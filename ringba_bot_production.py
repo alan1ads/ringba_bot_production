@@ -285,27 +285,31 @@ async def navigate_to_reporting(page):
     
     try:
         # Navigate directly to the call logs report page
-        await page.goto("https://app.ringba.com/#/dashboard/call-logs/report/new")
+        await page.goto("https://app.ringba.com/#/dashboard/call-logs/report/new", timeout=60000)
         logger.info("Navigating directly to call-logs/report/new page")
         
-        # Wait for the page to load
-        await asyncio.sleep(10)
+        # Wait longer for the page to load in cloud environments
+        await asyncio.sleep(15)  # Increased from 10 to 15 seconds
         
         # Save a screenshot for debugging
-        await page.screenshot(path="reporting_navigation.png")
-        logger.info("Saved screenshot after navigating to Reporting")
+        try:
+            await page.screenshot(path="reporting_navigation.png")
+            logger.info("Saved screenshot after navigating to Reporting")
+        except Exception as ss_error:
+            logger.warning(f"Could not save screenshot: {ss_error}")
         
         # Try several approaches to find the right UI to interact with
         
         # Approach 1: Look for and click the "Apply" button to load the report
         try:
-            apply_button = await page.wait_for_selector("button:has-text('Apply')", timeout=5000)
+            apply_button = await page.wait_for_selector("button:has-text('Apply')", timeout=10000)  # Increased timeout
             if apply_button:
                 logger.info("Found Apply button, clicking it to load report data")
                 await apply_button.click()
-                await asyncio.sleep(10)  # Wait for data to load
+                await asyncio.sleep(15)  # Increased wait time for data to load
         except Exception as e:
             logger.warning(f"Could not find or click Apply button: {e}")
+            # Continue execution even if this fails
         
         # Approach 2: Try to click on the Table view option
         try:
@@ -318,16 +322,17 @@ async def navigate_to_reporting(page):
             
             for selector in table_options:
                 try:
-                    table_tab = await page.wait_for_selector(selector, timeout=2000)
+                    table_tab = await page.wait_for_selector(selector, timeout=5000)
                     if table_tab:
                         logger.info(f"Found Table tab with selector: {selector}, clicking it")
                         await table_tab.click()
-                        await asyncio.sleep(5)
+                        await asyncio.sleep(10)  # Increased wait time
                         break
                 except Exception:
                     pass
         except Exception as tab_error:
             logger.warning(f"Could not find or click Table tab: {tab_error}")
+            # Continue execution even if this fails
         
         # Approach 3: Look for any "Run Report" or similar button
         try:
@@ -340,21 +345,26 @@ async def navigate_to_reporting(page):
             
             for btn_selector in run_buttons:
                 try:
-                    run_btn = await page.wait_for_selector(btn_selector, timeout=2000)
+                    run_btn = await page.wait_for_selector(btn_selector, timeout=5000)
                     if run_btn:
                         logger.info(f"Found button with selector: {btn_selector}, clicking it")
                         await run_btn.click()
-                        await asyncio.sleep(10)
+                        await asyncio.sleep(15)  # Increased wait time
                         break
                 except Exception:
                     pass
         except Exception as btn_error:
             logger.warning(f"Could not find or click run button: {btn_error}")
+            # Continue execution even if this fails
         
         # Take another screenshot after interactions
-        await page.screenshot(path="after_report_interactions.png")
-        logger.info("Saved screenshot after report page interactions")
+        try:
+            await page.screenshot(path="after_report_interactions.png")
+            logger.info("Saved screenshot after report page interactions")
+        except Exception as ss_error:
+            logger.warning(f"Could not save final screenshot: {ss_error}")
         
+        # Even if some steps fail, return success so we can try to export CSV
         return True
         
     except Exception as e:
@@ -369,23 +379,30 @@ async def export_and_download_csv(page):
     
     try:
         # First take a screenshot to debug
-        await page.screenshot(path="before_export.png")
+        try:
+            await page.screenshot(path="before_export.png")
+        except Exception as ss_error:
+            logger.warning(f"Could not save export screenshot: {ss_error}")
         
         # Try multiple selectors for the EXPORT CSV button
         export_selectors = [
             "button:has-text('EXPORT CSV')",
+            "button:has-text('Export CSV')",
+            "button:has-text('Export')",
             "button.export-csv",
             ".export-csv",
-            "button:has-text('Export')",
             "button:has-text('CSV')",
-            "text=EXPORT CSV"
+            "text=EXPORT CSV",
+            "text=Export CSV",
+            "a:has-text('Export')",
+            "a:has-text('CSV')"
         ]
         
         export_button = None
         for selector in export_selectors:
             try:
                 logger.info(f"Trying to find export button with selector: {selector}")
-                export_button = await page.wait_for_selector(selector, timeout=3000)
+                export_button = await page.wait_for_selector(selector, timeout=5000)
                 if export_button:
                     logger.info(f"Found export button with selector: {selector}")
                     break
@@ -393,7 +410,32 @@ async def export_and_download_csv(page):
                 pass
                 
         if not export_button:
-            logger.error("Could not find EXPORT CSV button")
+            logger.warning("Could not find EXPORT CSV button")
+            # Try searching entire page for any export button
+            try:
+                logger.info("Trying to find any export-related element")
+                await page.screenshot(path="export_search.png")
+                
+                # Get all buttons on the page
+                buttons = await page.query_selector_all("button, a.btn, .btn, a[role='button']")
+                logger.info(f"Found {len(buttons)} potential buttons")
+                
+                # Check each button's text for export-related keywords
+                for button in buttons:
+                    try:
+                        button_text = await button.inner_text()
+                        logger.info(f"Button text: {button_text}")
+                        if "export" in button_text.lower() or "csv" in button_text.lower() or "download" in button_text.lower():
+                            export_button = button
+                            logger.info(f"Found potential export button with text: {button_text}")
+                            break
+                    except Exception:
+                        pass
+            except Exception as search_error:
+                logger.warning(f"Error searching for buttons: {search_error}")
+            
+        if not export_button:
+            logger.error("Could not find any export button after exhaustive search")
             return False
             
         # Set up a download handler before clicking the button
@@ -402,20 +444,49 @@ async def export_and_download_csv(page):
         
         # Handle the download event
         logger.info("Setting up download handler")
-        async with page.expect_download() as download_info:
-            await export_button.click()
-            logger.info("Clicked EXPORT CSV button")
         
-        # Wait for the download to complete
-        download = await download_info.value
-        logger.info(f"Download started: {download.suggested_filename}")
-        
-        # Save the downloaded file
-        csv_path = os.path.join(download_path, download.suggested_filename)
-        await download.save_as(csv_path)
-        logger.info(f"Downloaded CSV to: {csv_path}")
-        
-        return csv_path
+        try:
+            # Try the async with approach first
+            async with page.expect_download(timeout=30000) as download_info:
+                await export_button.click()
+                logger.info("Clicked EXPORT CSV button, waiting for download...")
+                
+                # Wait for the download to complete
+                download = await download_info.value
+                logger.info(f"Download started: {download.suggested_filename}")
+                
+                # Save the downloaded file
+                csv_path = os.path.join(download_path, download.suggested_filename)
+                await download.save_as(csv_path)
+                logger.info(f"Downloaded CSV to: {csv_path}")
+                
+                return csv_path
+        except Exception as download_error:
+            logger.warning(f"First download approach failed: {download_error}")
+            
+            # If the first approach fails, try a simpler approach
+            try:
+                logger.info("Trying alternative download approach")
+                await export_button.click()
+                logger.info("Clicked export button, waiting for download...")
+                
+                # Wait for a moment for the download to start
+                await asyncio.sleep(10)
+                
+                # Check if any files were downloaded
+                import glob
+                downloaded_files = glob.glob(os.path.join(download_path, "*.csv"))
+                
+                if downloaded_files:
+                    latest_file = max(downloaded_files, key=os.path.getctime)
+                    logger.info(f"Found downloaded file: {latest_file}")
+                    return latest_file
+                else:
+                    logger.error("No CSV files found in downloads directory")
+                    return False
+            except Exception as alt_error:
+                logger.error(f"Alternative download approach failed: {alt_error}")
+                return False
     
     except Exception as e:
         logger.error(f"Error downloading CSV: {e}")
