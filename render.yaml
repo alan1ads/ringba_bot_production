@@ -1,15 +1,38 @@
 services:
-  - type: web
-    name: ringba-rpc-monitor
+  - type: cron
+    name: ringba-rpc-11am
     env: docker
     dockerfilePath: ./Dockerfile
     plan: starter
-    healthCheckPath: /
-    # Render creates an internal health check endpoint behind the scenes,
-    # so we don't worry about it failing for our script
-    scaling:
-      minInstances: 1
-      maxInstances: 1
+    schedule: "0 15 * * *"  # 11:00 AM ET = 15:00 UTC
+    envVars:
+      - key: RINGBA_EMAIL
+        sync: false
+      - key: RINGBA_PASSWORD
+        sync: false
+      - key: SLACK_WEBHOOK_URL
+        sync: false
+
+  - type: cron
+    name: ringba-rpc-2pm
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    schedule: "0 18 * * *"  # 2:00 PM ET = 18:00 UTC
+    envVars:
+      - key: RINGBA_EMAIL
+        sync: false
+      - key: RINGBA_PASSWORD
+        sync: false
+      - key: SLACK_WEBHOOK_URL
+        sync: false
+
+  - type: cron
+    name: ringba-rpc-430pm
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    schedule: "30 20 * * *"  # 4:30 PM ET = 20:30 UTC
     envVars:
       - key: RINGBA_EMAIL
         sync: false

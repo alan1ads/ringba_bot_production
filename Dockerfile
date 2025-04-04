@@ -43,4 +43,4 @@ COPY . .
 RUN mkdir -p downloads
 
 # Run the bot
-CMD ["python", "ringba_bot_production.py"]
+CMD ["python", "ringba_cron.py"]
