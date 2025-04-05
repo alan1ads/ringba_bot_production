@@ -118,42 +118,48 @@ class RequestHandler(BaseHTTPRequestHandler):
                 """
                 
                 if last_run_result.get("success"):
-                    threshold = last_run_result.get("threshold", 20)
-                    overall_rpc = last_run_result.get("overall_rpc", 0)
-                    is_below_threshold = last_run_result.get("is_below_threshold", False)
+                    target_rpc_data = last_run_result.get("target_rpc_data", [])
+                    low_rpc_targets = last_run_result.get("low_rpc_targets", [])
+                    threshold = last_run_result.get("threshold", 12.0)
                     
-                    if is_below_threshold:
+                    if low_rpc_targets:
                         alert_class = "error"
-                        alert_text = f"⚠️ RPC is below threshold (${threshold:.2f})"
+                        alert_text = f"⚠️ {len(low_rpc_targets)} targets with RPC below threshold (${threshold:.2f})"
                     else:
                         alert_class = "success"
-                        alert_text = f"✅ RPC is above threshold (${threshold:.2f})"
+                        alert_text = f"✅ All targets have RPC above threshold (${threshold:.2f})"
                     
                     html += f"""
                     <div class="info-box">
                         <h3 class="{alert_class}">{alert_text}</h3>
                         <table>
                             <tr>
-                                <th>Metric</th>
-                                <th>Value</th>
+                                <th>Target</th>
+                                <th>RPC Value</th>
+                                <th>Status</th>
                             </tr>
-                            <tr>
-                                <td>Current RPC</td>
-                                <td>${last_run_result.get("overall_rpc", 0):.2f}</td>
-                            </tr>
-                            <tr>
-                                <td>Min RPC</td>
-                                <td>${last_run_result.get("min_rpc", 0):.2f}</td>
-                            </tr>
-                            <tr>
-                                <td>Max RPC</td>
-                                <td>${last_run_result.get("max_rpc", 0):.2f}</td>
-                            </tr>
-                            <tr>
-                                <td>Threshold</td>
-                                <td>${threshold:.2f}</td>
-                            </tr>
-                        </table>
+                    """
+                    
+                    # Sort by RPC value (lowest first)
+                    sorted_targets = sorted(target_rpc_data, key=lambda x: x['RPC'])
+                    
+                    for target in sorted_targets[:50]:  # Limit to first 50 targets
+                        target_name = target.get("Target", "Unknown")
+                        rpc_value = target.get("RPC", 0)
+                        is_below = rpc_value < threshold
+                        status_class = "error" if is_below else "success"
+                        status_text = "Below threshold" if is_below else "OK"
+                        
+                        html += f"""
+                        <tr>
+                            <td>{target_name}</td>
+                            <td>${rpc_value:.2f}</td>
+                            <td class="{status_class}">{status_text}</td>
+                        </tr>
+                        """
+                    
+                    html += """
+                    </table>
                     </div>
                     """
                 else:
@@ -1022,7 +1028,7 @@ async def send_slack_notification(message):
 
 async def get_csv_values(page=None, start_fresh=False, retry_count=0):
     """
-    Navigate to the reporting page and extract the RPC value from the CSV
+    Navigate to the reporting page and extract the RPC values by target
     """
     logger.info("Starting get_csv_values...")
     MAX_RETRIES = 3
@@ -1046,7 +1052,7 @@ async def get_csv_values(page=None, start_fresh=False, retry_count=0):
                     return await get_csv_values(page=None, start_fresh=True, retry_count=retry_count + 1)
                 else:
                     logger.error("Max retries reached for login, giving up")
-                    return None, None, None
+                    return []
         
         # Check if browser/page is usable
         try:
@@ -1060,7 +1066,7 @@ async def get_csv_values(page=None, start_fresh=False, retry_count=0):
                 return await get_csv_values(page=None, start_fresh=True, retry_count=retry_count + 1)
             else:
                 logger.error("Max retries reached, giving up")
-                return None, None, None
+                return []
                 
         # Take screenshot for debugging
         try:
@@ -1082,7 +1088,7 @@ async def get_csv_values(page=None, start_fresh=False, retry_count=0):
                 return await get_csv_values(page=None, start_fresh=True, retry_count=retry_count + 1)
             else:
                 logger.error("Max retries reached for navigation, giving up")
-                return None, None, None
+                return []
         
         # Download the CSV file
         csv_path = await export_and_download_csv(page)
@@ -1095,7 +1101,7 @@ async def get_csv_values(page=None, start_fresh=False, retry_count=0):
                 return await get_csv_values(page=None, start_fresh=True, retry_count=retry_count + 1)
             else:
                 logger.error("Max retries reached, giving up")
-                return None, None, None
+                return []
         
         logger.info(f"CSV downloaded to: {csv_path}")
         
@@ -1107,13 +1113,26 @@ async def get_csv_values(page=None, start_fresh=False, retry_count=0):
             df = pd.read_csv(csv_path)
             logger.info(f"CSV loaded with columns: {df.columns.tolist()}")
             
-            # Look for RPC column
+            # Look for target column and RPC column
+            target_column = None
             rpc_column = None
+            
+            # Find target column
             for col in df.columns:
-                if 'RPC' in col or 'rpc' in col.lower():
+                if col.lower() in ['target', 'campaign', 'campaign name', 'name']:
+                    target_column = col
+                    break
+            
+            # Find RPC column
+            for col in df.columns:
+                if 'rpc' in col.lower():
                     rpc_column = col
                     logger.info(f"Found RPC column: {rpc_column}")
                     break
+            
+            if not target_column:
+                logger.warning("Could not find a target column, using first column")
+                target_column = df.columns[0]
             
             if not rpc_column:
                 logger.warning("Could not find an RPC column, trying alternative column names")
@@ -1124,18 +1143,6 @@ async def get_csv_values(page=None, start_fresh=False, retry_count=0):
                         logger.info(f"Using alternative column as RPC: {rpc_column}")
                         break
             
-            if not rpc_column and not df.empty and len(df.columns) > 0:
-                # If still not found, use the last numeric column as a desperate measure
-                for col in df.columns:
-                    try:
-                        # Check if column can be converted to numeric
-                        pd.to_numeric(df[col], errors='raise')
-                        rpc_column = col
-                        logger.info(f"Using numeric column as fallback for RPC: {rpc_column}")
-                        break
-                    except:
-                        continue
-            
             if not rpc_column:
                 logger.error("Could not find a usable RPC column in the CSV")
                 if retry_count < MAX_RETRIES:
@@ -1145,11 +1152,11 @@ async def get_csv_values(page=None, start_fresh=False, retry_count=0):
                     return await get_csv_values(page=None, start_fresh=True, retry_count=retry_count + 1)
                 else:
                     logger.error("Max retries reached, giving up")
-                    return None, None, None
+                    return []
             
             # Clean the RPC values (remove $ and commas)
-            if isinstance(df[rpc_column].iloc[0], str):
-                df[rpc_column] = df[rpc_column].str.replace('$', '').str.replace(',', '')
+            if df[rpc_column].dtype == object:  # if string type
+                df[rpc_column] = df[rpc_column].astype(str).str.replace('$', '').str.replace(',', '')
             
             # Convert to numeric
             df[rpc_column] = pd.to_numeric(df[rpc_column], errors='coerce')
@@ -1166,14 +1173,19 @@ async def get_csv_values(page=None, start_fresh=False, retry_count=0):
                     return await get_csv_values(page=None, start_fresh=True, retry_count=retry_count + 1)
                 else:
                     logger.error("Max retries reached, giving up")
-                    return None, None, None
+                    return []
             
-            # Calculate min, max, and average RPC
-            min_rpc = df[rpc_column].min()
-            max_rpc = df[rpc_column].max()
-            overall_rpc = df[rpc_column].mean()
+            # Create a list of target and RPC data
+            target_rpc_data = []
+            for _, row in df.iterrows():
+                target_name = row[target_column]
+                rpc_value = row[rpc_column]
+                target_rpc_data.append({
+                    'Target': str(target_name),
+                    'RPC': float(rpc_value)
+                })
             
-            logger.info(f"Extracted RPC values - Min: {min_rpc}, Avg: {overall_rpc}, Max: {max_rpc}")
+            logger.info(f"Extracted {len(target_rpc_data)} target RPC values")
             
             # Clean up the CSV file
             try:
@@ -1182,7 +1194,7 @@ async def get_csv_values(page=None, start_fresh=False, retry_count=0):
             except Exception as remove_error:
                 logger.warning(f"Could not remove CSV file: {remove_error}")
             
-            return min_rpc, overall_rpc, max_rpc
+            return target_rpc_data
             
         except Exception as csv_error:
             logger.error(f"Error processing CSV file: {csv_error}")
@@ -1192,7 +1204,7 @@ async def get_csv_values(page=None, start_fresh=False, retry_count=0):
                     await browser.close()
                 return await get_csv_values(page=None, start_fresh=True, retry_count=retry_count + 1)
             else:
-                return None, None, None
+                return []
     
     except Exception as e:
         logger.error(f"Error in get_csv_values: {e}")
@@ -1204,7 +1216,7 @@ async def get_csv_values(page=None, start_fresh=False, retry_count=0):
             return await get_csv_values(page=None, start_fresh=True, retry_count=retry_count + 1)
         else:
             logger.error("Max retries reached, giving up")
-            return None, None, None
+            return []
             
     finally:
         # Close browser if we created it and it's still open
@@ -1242,9 +1254,9 @@ async def main():
         
         # Get RPC values with retries
         logger.info("Getting CSV values...")
-        min_rpc, overall_rpc, max_rpc = await get_csv_values(start_fresh=True)
+        target_rpc_data = await get_csv_values(start_fresh=True)
         
-        if min_rpc is None or overall_rpc is None or max_rpc is None:
+        if not target_rpc_data:
             error_message = "Failed to get RPC values after multiple attempts"
             logger.error(error_message)
             
@@ -1265,49 +1277,49 @@ async def main():
             )
             return
         
-        # Format values as currency
-        min_rpc_formatted = f"${min_rpc:.2f}"
-        overall_rpc_formatted = f"${overall_rpc:.2f}"
-        max_rpc_formatted = f"${max_rpc:.2f}"
+        # Get the RPC threshold (default to 12.0)
+        threshold = float(os.environ.get("RPC_THRESHOLD", "12.0"))
         
-        # Get the threshold from environment variable, default to 20
-        threshold = float(os.environ.get("RPC_THRESHOLD", "20"))
+        # Filter targets that have RPC below the threshold
+        low_rpc_targets = [item for item in target_rpc_data if item["RPC"] < threshold]
         
-        # Determine if RPC is below threshold
-        is_below_threshold = overall_rpc < threshold
+        # If no targets below threshold, log and exit
+        if not low_rpc_targets:
+            logger.info(f"No targets with RPC below ${threshold}")
+            
+            # Update last run result
+            last_run_result = {
+                "success": True,
+                "target_rpc_data": target_rpc_data,
+                "low_rpc_targets": [],
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "environment": env_info
+            }
+            
+            # No notification needed
+            return
         
-        # Create message for Slack
-        if is_below_threshold:
-            message = (
-                f"🚨 *RPC Alert*: Current RPC is below threshold of ${threshold:.2f}\n"
-                f"*Current RPC*: {overall_rpc_formatted}\n"
-                f"*Min RPC*: {min_rpc_formatted}\n"
-                f"*Max RPC*: {max_rpc_formatted}\n"
-                f"*Time*: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-            )
-        else:
-            message = (
-                f"✅ *RPC Status*: Current RPC is above threshold of ${threshold:.2f}\n"
-                f"*Current RPC*: {overall_rpc_formatted}\n"
-                f"*Min RPC*: {min_rpc_formatted}\n"
-                f"*Max RPC*: {max_rpc_formatted}\n"
-                f"*Time*: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-            )
+        # Create message for Slack with the targets below threshold
+        now = datetime.now()
+        message = f"🚨 *RPC ALERT - {now.strftime('%Y-%m-%d %H:%M:%S')} ET:*\n"
+        message += f"The following targets have RPC values below ${threshold}:\n\n"
+        
+        # Add each target with low RPC to the message
+        for item in low_rpc_targets:
+            message += f"• *{item['Target']}*: ${item['RPC']:.2f}\n"
         
         # Update last run result
         last_run_result = {
             "success": True,
-            "min_rpc": min_rpc,
-            "overall_rpc": overall_rpc,
-            "max_rpc": max_rpc,
-            "is_below_threshold": is_below_threshold,
+            "target_rpc_data": target_rpc_data,
+            "low_rpc_targets": low_rpc_targets,
             "threshold": threshold,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "environment": env_info
         }
         
         # Send notification to Slack
-        logger.info(f"Sending Slack notification: {message}")
+        logger.info(f"Sending Slack notification for {len(low_rpc_targets)} targets with low RPC")
         await send_slack_notification(message)
         
     except Exception as e:
