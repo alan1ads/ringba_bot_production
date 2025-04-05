@@ -949,11 +949,11 @@ async def read_csv_data(csv_path):
         # Extract the data
         data = []
         for _, row in df.iterrows():
-            target_value = row[target_column]
+            target_name = row[target_column]
             rpc_value = row[rpc_column]
             
             # Skip empty values
-            if pd.isna(target_value) or pd.isna(rpc_value):
+            if pd.isna(target_name) or pd.isna(rpc_value):
                 continue
                 
             # Convert RPC to float if it's a string with a dollar sign
@@ -965,8 +965,12 @@ async def read_csv_data(csv_path):
                     logger.warning(f"Could not convert RPC value to float: {rpc_value}")
                     continue
             
+            # Handle NaN or empty target names - these are typically total/average rows
+            if pd.isna(target_name) or str(target_name).lower() == 'nan' or str(target_name).strip() == '':
+                target_name = "Totals (all targets average)"
+            
             data.append({
-                'Target': str(target_value),
+                'Target': str(target_name),
                 'RPC': float(rpc_value)
             })
         
@@ -1180,6 +1184,11 @@ async def get_csv_values(page=None, start_fresh=False, retry_count=0):
             for _, row in df.iterrows():
                 target_name = row[target_column]
                 rpc_value = row[rpc_column]
+                
+                # Handle NaN or empty target names - these are typically total/average rows
+                if pd.isna(target_name) or str(target_name).lower() == 'nan' or str(target_name).strip() == '':
+                    target_name = "Totals (all targets average)"
+                
                 target_rpc_data.append({
                     'Target': str(target_name),
                     'RPC': float(rpc_value)
