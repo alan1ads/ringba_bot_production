@@ -23,7 +23,18 @@ logger = logging.getLogger(__name__)
 os.makedirs(os.path.join(os.getcwd(), "downloads"), exist_ok=True)
 
 # Import after ensuring directories exist
-from ringba_bot_production import check_rpc_values, ensure_packages_installed
+try:
+    from ringba_bot_production import main, ensure_packages_installed
+    logger.info("Successfully imported main function")
+    check_rpc_values = main  # Use main as check_rpc_values
+except ImportError as e:
+    logger.error(f"Failed to import main: {e}")
+    try:
+        from ringba_bot_production import check_rpc_values, ensure_packages_installed
+        logger.info("Successfully imported check_rpc_values function")
+    except ImportError as e2:
+        logger.error(f"Failed to import check_rpc_values: {e2}")
+        sys.exit(1)
 
 # Run the check immediately without scheduling
 if __name__ == "__main__":

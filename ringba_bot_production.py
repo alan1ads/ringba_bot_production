@@ -1020,6 +1020,201 @@ async def send_slack_notification(message):
         logger.error(f"Error sending Slack notification: {e}")
         return False
 
+async def get_csv_values(page=None, start_fresh=False, retry_count=0):
+    """
+    Navigate to the reporting page and extract the RPC value from the CSV
+    """
+    logger.info("Starting get_csv_values...")
+    MAX_RETRIES = 3
+    browser = None
+    
+    try:
+        # If starting fresh or no page provided, create a new browser session
+        if start_fresh or not page:
+            logger.info("Creating new browser instance...")
+            playwright, browser, context, page = await setup_browser(headless=True)
+            
+            # Login first
+            login_success = await login_to_ringba(page)
+            if not login_success:
+                logger.error("Login failed")
+                if retry_count < MAX_RETRIES:
+                    if browser:
+                        await browser.close()
+                    if 'playwright' in globals():
+                        await playwright.stop()
+                    return await get_csv_values(page=None, start_fresh=True, retry_count=retry_count + 1)
+                else:
+                    logger.error("Max retries reached for login, giving up")
+                    return None, None, None
+        
+        # Check if browser/page is usable
+        try:
+            await page.evaluate("1")
+        except Exception as e:
+            logger.error(f"Page is not usable after login: {e}")
+            if retry_count < MAX_RETRIES:
+                logger.info(f"Retrying get_csv_values (attempt {retry_count + 1}/{MAX_RETRIES})...")
+                if browser:
+                    await browser.close()
+                return await get_csv_values(page=None, start_fresh=True, retry_count=retry_count + 1)
+            else:
+                logger.error("Max retries reached, giving up")
+                return None, None, None
+                
+        # Take screenshot for debugging
+        try:
+            await page.screenshot(path="after_login.png")
+            logger.info("Saved screenshot after login")
+        except Exception as ss_error:
+            logger.warning(f"Could not save screenshot: {ss_error}")
+        
+        # Navigate to reporting page
+        logger.info("Navigating to reporting page...")
+        navigation_success = await navigate_to_reporting(page)
+        
+        if not navigation_success:
+            logger.error("Failed to navigate to reporting page")
+            if retry_count < MAX_RETRIES:
+                logger.info(f"Retrying get_csv_values (attempt {retry_count + 1}/{MAX_RETRIES})...")
+                if browser:
+                    await browser.close()
+                return await get_csv_values(page=None, start_fresh=True, retry_count=retry_count + 1)
+            else:
+                logger.error("Max retries reached for navigation, giving up")
+                return None, None, None
+        
+        # Download the CSV file
+        csv_path = await export_and_download_csv(page)
+        if not csv_path:
+            logger.error("Failed to download CSV file")
+            if retry_count < MAX_RETRIES:
+                logger.info(f"Retrying get_csv_values (attempt {retry_count + 1}/{MAX_RETRIES})...")
+                if browser:
+                    await browser.close()
+                return await get_csv_values(page=None, start_fresh=True, retry_count=retry_count + 1)
+            else:
+                logger.error("Max retries reached, giving up")
+                return None, None, None
+        
+        logger.info(f"CSV downloaded to: {csv_path}")
+        
+        # Process the CSV file to extract RPC values
+        try:
+            import pandas as pd
+            
+            # Read the CSV file
+            df = pd.read_csv(csv_path)
+            logger.info(f"CSV loaded with columns: {df.columns.tolist()}")
+            
+            # Look for RPC column
+            rpc_column = None
+            for col in df.columns:
+                if 'RPC' in col or 'rpc' in col.lower():
+                    rpc_column = col
+                    logger.info(f"Found RPC column: {rpc_column}")
+                    break
+            
+            if not rpc_column:
+                logger.warning("Could not find an RPC column, trying alternative column names")
+                # Try common alternative names
+                for col in df.columns:
+                    if any(keyword in col.lower() for keyword in ['revenue', 'profit', 'earning', 'value']):
+                        rpc_column = col
+                        logger.info(f"Using alternative column as RPC: {rpc_column}")
+                        break
+            
+            if not rpc_column and not df.empty and len(df.columns) > 0:
+                # If still not found, use the last numeric column as a desperate measure
+                for col in df.columns:
+                    try:
+                        # Check if column can be converted to numeric
+                        pd.to_numeric(df[col], errors='raise')
+                        rpc_column = col
+                        logger.info(f"Using numeric column as fallback for RPC: {rpc_column}")
+                        break
+                    except:
+                        continue
+            
+            if not rpc_column:
+                logger.error("Could not find a usable RPC column in the CSV")
+                if retry_count < MAX_RETRIES:
+                    logger.info(f"Retrying get_csv_values (attempt {retry_count + 1}/{MAX_RETRIES})...")
+                    if browser:
+                        await browser.close()
+                    return await get_csv_values(page=None, start_fresh=True, retry_count=retry_count + 1)
+                else:
+                    logger.error("Max retries reached, giving up")
+                    return None, None, None
+            
+            # Clean the RPC values (remove $ and commas)
+            if isinstance(df[rpc_column].iloc[0], str):
+                df[rpc_column] = df[rpc_column].str.replace('$', '').str.replace(',', '')
+            
+            # Convert to numeric
+            df[rpc_column] = pd.to_numeric(df[rpc_column], errors='coerce')
+            
+            # Drop NaN values
+            df = df.dropna(subset=[rpc_column])
+            
+            if df.empty:
+                logger.error("No valid RPC values found after conversion")
+                if retry_count < MAX_RETRIES:
+                    logger.info(f"Retrying get_csv_values (attempt {retry_count + 1}/{MAX_RETRIES})...")
+                    if browser:
+                        await browser.close()
+                    return await get_csv_values(page=None, start_fresh=True, retry_count=retry_count + 1)
+                else:
+                    logger.error("Max retries reached, giving up")
+                    return None, None, None
+            
+            # Calculate min, max, and average RPC
+            min_rpc = df[rpc_column].min()
+            max_rpc = df[rpc_column].max()
+            overall_rpc = df[rpc_column].mean()
+            
+            logger.info(f"Extracted RPC values - Min: {min_rpc}, Avg: {overall_rpc}, Max: {max_rpc}")
+            
+            # Clean up the CSV file
+            try:
+                os.remove(csv_path)
+                logger.info(f"Removed CSV file: {csv_path}")
+            except Exception as remove_error:
+                logger.warning(f"Could not remove CSV file: {remove_error}")
+            
+            return min_rpc, overall_rpc, max_rpc
+            
+        except Exception as csv_error:
+            logger.error(f"Error processing CSV file: {csv_error}")
+            if retry_count < MAX_RETRIES:
+                logger.info(f"Retrying get_csv_values (attempt {retry_count + 1}/{MAX_RETRIES})...")
+                if browser:
+                    await browser.close()
+                return await get_csv_values(page=None, start_fresh=True, retry_count=retry_count + 1)
+            else:
+                return None, None, None
+    
+    except Exception as e:
+        logger.error(f"Error in get_csv_values: {e}")
+        logger.exception(e)
+        if retry_count < MAX_RETRIES:
+            logger.info(f"Retrying get_csv_values (attempt {retry_count + 1}/{MAX_RETRIES})...")
+            if browser:
+                await browser.close()
+            return await get_csv_values(page=None, start_fresh=True, retry_count=retry_count + 1)
+        else:
+            logger.error("Max retries reached, giving up")
+            return None, None, None
+            
+    finally:
+        # Close browser if we created it and it's still open
+        if start_fresh and browser:
+            try:
+                await browser.close()
+                logger.info("Browser closed")
+            except Exception as e:
+                logger.warning(f"Error closing browser: {e}")
+
 async def main():
     """
     Main function to get RPC values and send Slack notification
@@ -1175,6 +1370,14 @@ def setup_schedule():
     
     schedule.every().day.at(f"{(16 + offset_hours) % 24:02d}:30").do(run_check)
     logger.info(f"Scheduled check at 4:30 PM ET (local time: {(16 + offset_hours) % 24:02d}:30)")
+
+# Add this after the main function
+async def check_rpc_values():
+    """
+    Alias for the main function to maintain backwards compatibility
+    """
+    logger.info("check_rpc_values called (alias for main function)")
+    return await main()
 
 # Run the first check and then schedule periodic checks
 if __name__ == "__main__":
