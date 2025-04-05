@@ -29,6 +29,10 @@ import sys
 from dotenv import load_dotenv
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
+import pandas as pd
+import platform
+import psutil
+from playwright.async_api import async_playwright
 
 # Configure logging
 logging.basicConfig(
@@ -68,27 +72,193 @@ def ensure_packages_installed():
 ensure_packages_installed()
 
 # Health check endpoint for Render.com
-class HealthCheckHandler(BaseHTTPRequestHandler):
+class RequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == '/':
+        if self.path == "/":
             self.send_response(200)
-            self.send_header('Content-type', 'text/plain')
+            self.send_header("Content-type", "text/html")
             self.end_headers()
-            self.wfile.write(b'Ringba RPC Monitor Bot is running')
+            
+            # Create HTML status page with last run result
+            html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Ringba Bot Status</title>
+                <style>
+                    body { font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }
+                    .container { max-width: 800px; margin: 0 auto; background-color: white; padding: 20px; border-radius: 5px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+                    h1 { color: #333; }
+                    .success { color: green; }
+                    .error { color: red; }
+                    .warning { color: orange; }
+                    .info-box { background-color: #f0f0f0; padding: 15px; border-radius: 5px; margin: 15px 0; }
+                    .button { display: inline-block; background-color: #4CAF50; color: white; padding: 10px 15px; text-decoration: none; border-radius: 4px; margin-top: 20px; }
+                    table { width: 100%; border-collapse: collapse; }
+                    th, td { padding: 8px; text-align: left; border-bottom: 1px solid #ddd; }
+                    th { background-color: #f2f2f2; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h1>Ringba Bot Status</h1>
+            """
+            
+            if last_run_result:
+                if last_run_result.get("success"):
+                    status_class = "success"
+                    status_text = "Success"
+                else:
+                    status_class = "error"
+                    status_text = "Error"
+                    
+                html += f"""
+                    <h2>Last Run Status: <span class="{status_class}">{status_text}</span></h2>
+                    <p>Last run: {last_run_result.get("timestamp", "Unknown")}</p>
+                """
+                
+                if last_run_result.get("success"):
+                    threshold = last_run_result.get("threshold", 20)
+                    overall_rpc = last_run_result.get("overall_rpc", 0)
+                    is_below_threshold = last_run_result.get("is_below_threshold", False)
+                    
+                    if is_below_threshold:
+                        alert_class = "error"
+                        alert_text = f"⚠️ RPC is below threshold (${threshold:.2f})"
+                    else:
+                        alert_class = "success"
+                        alert_text = f"✅ RPC is above threshold (${threshold:.2f})"
+                    
+                    html += f"""
+                    <div class="info-box">
+                        <h3 class="{alert_class}">{alert_text}</h3>
+                        <table>
+                            <tr>
+                                <th>Metric</th>
+                                <th>Value</th>
+                            </tr>
+                            <tr>
+                                <td>Current RPC</td>
+                                <td>${last_run_result.get("overall_rpc", 0):.2f}</td>
+                            </tr>
+                            <tr>
+                                <td>Min RPC</td>
+                                <td>${last_run_result.get("min_rpc", 0):.2f}</td>
+                            </tr>
+                            <tr>
+                                <td>Max RPC</td>
+                                <td>${last_run_result.get("max_rpc", 0):.2f}</td>
+                            </tr>
+                            <tr>
+                                <td>Threshold</td>
+                                <td>${threshold:.2f}</td>
+                            </tr>
+                        </table>
+                    </div>
+                    """
+                else:
+                    html += f"""
+                    <div class="info-box error">
+                        <h3>Error Details</h3>
+                        <p>{last_run_result.get("error", "Unknown error")}</p>
+                    </div>
+                    """
+                
+                # Display environment information
+                env_info = last_run_result.get("environment", {})
+                if env_info:
+                    html += """
+                    <h3>Environment Information</h3>
+                    <table>
+                        <tr>
+                            <th>Metric</th>
+                            <th>Value</th>
+                        </tr>
+                    """
+                    
+                    for key, value in env_info.items():
+                        html += f"""
+                        <tr>
+                            <td>{key}</td>
+                            <td>{value}</td>
+                        </tr>
+                        """
+                    
+                    html += """
+                    </table>
+                    """
+            else:
+                html += """
+                <h2 class="warning">No Data Available</h2>
+                <p>The bot has not completed any runs yet.</p>
+                """
+            
+            html += """
+                    <a href="/run" class="button">Run Check Now</a>
+                </div>
+            </body>
+            </html>
+            """
+            
+            self.wfile.write(html.encode())
+        
+        elif self.path == "/health":
+            self.send_response(200)
+            self.send_header("Content-type", "application/json")
+            self.end_headers()
+            
+            health_status = {
+                "status": "healthy",
+                "lastRun": last_run_result.get("timestamp", "Never"),
+                "success": last_run_result.get("success", False)
+            }
+            
+            self.wfile.write(json.dumps(health_status).encode())
+        
+        elif self.path == "/run":
+            self.send_response(200)
+            self.send_header("Content-type", "text/html")
+            self.end_headers()
+            
+            # Start the RPC check in a separate thread
+            threading.Thread(target=run_check).start()
+            
+            html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Run Triggered</title>
+                <style>
+                    body { font-family: Arial, sans-serif; margin: 20px; text-align: center; background-color: #f5f5f5; }
+                    .container { max-width: 600px; margin: 0 auto; background-color: white; padding: 20px; border-radius: 5px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+                    h1 { color: #333; }
+                    p { margin: 20px 0; }
+                    .button { display: inline-block; background-color: #2196F3; color: white; padding: 10px 15px; text-decoration: none; border-radius: 4px; }
+                </style>
+                <meta http-equiv="refresh" content="5;url=/" />
+            </head>
+            <body>
+                <div class="container">
+                    <h1>Check Started</h1>
+                    <p>The RPC check has been triggered and is running in the background.</p>
+                    <p>You will be redirected to the status page in 5 seconds...</p>
+                    <a href="/" class="button">Return to Status Page</a>
+                </div>
+            </body>
+            </html>
+            """
+            
+            self.wfile.write(html.encode())
+        
         else:
             self.send_response(404)
-            self.send_header('Content-type', 'text/plain')
             self.end_headers()
-            self.wfile.write(b'Not Found')
-    
-    def log_message(self, format, *args):
-        # Suppress HTTP logs to avoid cluttering the console
-        return
+            self.wfile.write(b"Not Found")
 
 def start_health_check_server():
     """Start a simple HTTP server for health checks"""
     port = int(os.environ.get('PORT', 10000))  # Render.com sets the PORT environment variable
-    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    server = HTTPServer(('0.0.0.0', port), RequestHandler)
     logger.info(f"Starting health check server on port {port}")
     server.serve_forever()
 
@@ -99,71 +269,91 @@ RINGBA_PASSWORD = os.getenv("RINGBA_PASSWORD")
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
 RPC_THRESHOLD = 12.0  # $12 threshold for notifications
 
+# Global variable to store the last run result
+last_run_result = None
+
+# Initialize playwright
+playwright = None
+
 # Random delay function for human-like behavior
 def random_sleep_async(min_seconds=0.5, max_seconds=2.0):
     """Generate a random sleep duration for human-like behavior"""
     return random.uniform(min_seconds, max_seconds)
 
-async def setup_browser(headless=True):
+async def setup_browser(headless=True, retry_count=3):
     """
-    Set up and configure Playwright browser
+    Set up and configure Playwright browser with retry mechanism
     """
-    try:
-        from playwright.async_api import async_playwright
-        
-        logger.info("Starting Playwright...")
-        playwright = await async_playwright().start()
-        
-        # Use chromium for best compatibility
-        browser = await playwright.chromium.launch(
-            headless=headless,  # Use headless=True for production
-            args=[
-                "--disable-features=BlinkGenPropertyTrees",
-                "--disable-blink-features=AutomationControlled",
-            ]
-        )
-        
-        # Create a context with specific viewport and user agent
-        context = await browser.new_context(
-            viewport={"width": 1920, "height": 1080},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
-        )
-        
-        # Add script to hide automation
-        await context.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    for attempt in range(retry_count):
+        try:
+            logger.info(f"Starting Playwright (attempt {attempt+1}/{retry_count})...")
+            playwright = await async_playwright().start()
             
-            // Overwrite plugins
-            Object.defineProperty(navigator, 'plugins', {
-                get: () => {
-                    return {
-                        length: 5,
-                        item: () => null,
-                        refresh: () => {},
-                        namedItem: () => null,
-                        0: {name: 'Chrome PDF Plugin'},
-                        1: {name: 'Chrome PDF Viewer'},
-                        2: {name: 'Native Client'},
-                        3: {name: 'Microsoft Edge PDF Plugin'},
-                        4: {name: 'Microsoft Edge PDF Viewer'}
-                    };
-                }
-            });
+            # Use chromium for best compatibility
+            browser = await playwright.chromium.launch(
+                headless=headless,  # Use headless=True for production
+                args=[
+                    "--disable-features=BlinkGenPropertyTrees",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-dev-shm-usage",  # Helps with memory issues in containerized environments
+                    "--no-sandbox",  # Required for running in containers
+                    "--disable-setuid-sandbox",
+                    "--single-process",  # Use single process to reduce memory usage
+                ]
+            )
             
-            // Add languages
-            Object.defineProperty(navigator, 'languages', {
-                get: () => ['en-US', 'en', 'es']
-            });
-        """)
+            # Create a context with specific viewport and user agent
+            context = await browser.new_context(
+                viewport={"width": 1366, "height": 768},  # Reduced size for less memory usage
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
+            )
+            
+            # Add script to hide automation
+            await context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                
+                // Overwrite plugins
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => {
+                        return {
+                            length: 5,
+                            item: () => null,
+                            refresh: () => {},
+                            namedItem: () => null,
+                            0: {name: 'Chrome PDF Plugin'},
+                            1: {name: 'Chrome PDF Viewer'},
+                            2: {name: 'Native Client'},
+                            3: {name: 'Microsoft Edge PDF Plugin'},
+                            4: {name: 'Microsoft Edge PDF Viewer'}
+                        };
+                    }
+                });
+                
+                // Add languages
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['en-US', 'en', 'es']
+                });
+            """)
+            
+            # Create a new page
+            page = await context.new_page()
+            
+            # Add event listeners for potential errors
+            page.on("crash", lambda: logger.error("Page crashed"))
+            page.on("close", lambda: logger.warning("Page was closed"))
+            
+            logger.info("Playwright browser setup complete")
+            return playwright, browser, context, page
         
-        # Create a new page
-        page = await context.new_page()
-        
-        logger.info("Playwright browser setup complete")
-        return playwright, browser, context, page
-    except Exception as e:
-        logger.error(f"Error setting up Playwright: {e}")
-        raise
+        except Exception as e:
+            logger.error(f"Error setting up Playwright (attempt {attempt+1}/{retry_count}): {e}")
+            
+            # Last attempt, raise the error
+            if attempt == retry_count - 1:
+                raise
+            
+            # Wait before retrying
+            await asyncio.sleep(3)
 
 async def login_to_ringba(page):
     """
@@ -279,17 +469,32 @@ async def login_to_ringba(page):
 
 async def navigate_to_reporting(page):
     """
-    Navigate to the Reporting tab and export CSV data
+    Navigate to the Reporting tab and export CSV data with better error handling
     """
     logger.info("Navigating to Reporting tab...")
     
     try:
-        # Navigate directly to the call logs report page
-        await page.goto("https://app.ringba.com/#/dashboard/call-logs/report/new", timeout=60000)
+        # Navigate directly to the call logs report page with increased timeout
+        await page.goto("https://app.ringba.com/#/dashboard/call-logs/report/new", timeout=90000)
         logger.info("Navigating directly to call-logs/report/new page")
         
+        # Check if page is still usable after navigation
+        try:
+            await page.evaluate("1")
+        except Exception as e:
+            logger.error(f"Page is no longer usable after initial navigation: {e}")
+            return False
+        
         # Wait longer for the page to load in cloud environments
-        await asyncio.sleep(15)  # Increased from 10 to 15 seconds
+        # Use shorter sleep intervals with checks to avoid browser termination
+        for i in range(5):
+            await asyncio.sleep(3)
+            try:
+                # Check if page is still alive
+                await page.evaluate("1")
+            except Exception:
+                logger.error("Browser context was closed during page load wait")
+                return False
         
         # Save a screenshot for debugging
         try:
@@ -298,64 +503,117 @@ async def navigate_to_reporting(page):
         except Exception as ss_error:
             logger.warning(f"Could not save screenshot: {ss_error}")
         
+        # Check if page is still usable before interacting
+        try:
+            await page.evaluate("1")
+        except Exception:
+            logger.error("Browser context was closed before UI interaction")
+            return False
+        
         # Try several approaches to find the right UI to interact with
+        apply_clicked = False
+        table_clicked = False
+        run_clicked = False
         
         # Approach 1: Look for and click the "Apply" button to load the report
         try:
-            apply_button = await page.wait_for_selector("button:has-text('Apply')", timeout=10000)  # Increased timeout
+            apply_button = await page.wait_for_selector("button:has-text('Apply')", timeout=10000)
             if apply_button:
                 logger.info("Found Apply button, clicking it to load report data")
                 await apply_button.click()
-                await asyncio.sleep(15)  # Increased wait time for data to load
+                apply_clicked = True
+                
+                # Wait in smaller intervals with browser checks
+                for i in range(5):
+                    await asyncio.sleep(3)
+                    try:
+                        await page.evaluate("1")
+                    except Exception:
+                        logger.error("Browser context was closed during Apply wait")
+                        return False
         except Exception as e:
             logger.warning(f"Could not find or click Apply button: {e}")
             # Continue execution even if this fails
         
-        # Approach 2: Try to click on the Table view option
+        # Check if browser is still alive
         try:
-            table_options = [
-                "text=Table",
-                "button:has-text('Table')",
-                "div[role='tab']:has-text('Table')",
-                ".tab:has-text('Table')"
-            ]
-            
-            for selector in table_options:
-                try:
-                    table_tab = await page.wait_for_selector(selector, timeout=5000)
-                    if table_tab:
-                        logger.info(f"Found Table tab with selector: {selector}, clicking it")
-                        await table_tab.click()
-                        await asyncio.sleep(10)  # Increased wait time
-                        break
-                except Exception:
-                    pass
-        except Exception as tab_error:
-            logger.warning(f"Could not find or click Table tab: {tab_error}")
-            # Continue execution even if this fails
+            await page.evaluate("1")
+        except Exception:
+            logger.error("Browser context was closed after Apply button")
+            return False
+        
+        # Approach 2: Try to click on the Table view option
+        if not apply_clicked:
+            try:
+                table_options = [
+                    "text=Table",
+                    "button:has-text('Table')",
+                    "div[role='tab']:has-text('Table')",
+                    ".tab:has-text('Table')"
+                ]
+                
+                for selector in table_options:
+                    try:
+                        table_tab = await page.wait_for_selector(selector, timeout=5000)
+                        if table_tab:
+                            logger.info(f"Found Table tab with selector: {selector}, clicking it")
+                            await table_tab.click()
+                            table_clicked = True
+                            
+                            # Wait in smaller intervals with browser checks
+                            for i in range(3):
+                                await asyncio.sleep(3)
+                                try:
+                                    await page.evaluate("1")
+                                except Exception:
+                                    logger.error("Browser context was closed during table tab wait")
+                                    return False
+                            break
+                    except Exception:
+                        pass
+            except Exception as tab_error:
+                logger.warning(f"Could not find or click Table tab: {tab_error}")
+                # Continue execution even if this fails
+        
+        # Check if browser is still alive
+        try:
+            await page.evaluate("1")
+        except Exception:
+            logger.error("Browser context was closed after Table tab")
+            return False
         
         # Approach 3: Look for any "Run Report" or similar button
-        try:
-            run_buttons = [
-                "button:has-text('Run')",
-                "button:has-text('Run Report')",
-                "button:has-text('Generate')",
-                "button:has-text('Submit')"
-            ]
-            
-            for btn_selector in run_buttons:
-                try:
-                    run_btn = await page.wait_for_selector(btn_selector, timeout=5000)
-                    if run_btn:
-                        logger.info(f"Found button with selector: {btn_selector}, clicking it")
-                        await run_btn.click()
-                        await asyncio.sleep(15)  # Increased wait time
-                        break
-                except Exception:
-                    pass
-        except Exception as btn_error:
-            logger.warning(f"Could not find or click run button: {btn_error}")
-            # Continue execution even if this fails
+        if not apply_clicked and not table_clicked:
+            try:
+                run_buttons = [
+                    "button:has-text('Run')",
+                    "button:has-text('Run Report')",
+                    "button:has-text('Generate')",
+                    "button:has-text('Submit')"
+                ]
+                
+                for btn_selector in run_buttons:
+                    try:
+                        run_btn = await page.wait_for_selector(btn_selector, timeout=5000)
+                        if run_btn:
+                            logger.info(f"Found button with selector: {btn_selector}, clicking it")
+                            await run_btn.click()
+                            run_clicked = True
+                            
+                            # Wait in smaller intervals with browser checks
+                            for i in range(5):
+                                await asyncio.sleep(3)
+                                try:
+                                    await page.evaluate("1")
+                                except Exception:
+                                    logger.error("Browser context was closed during run button wait")
+                                    return False
+                            break
+                    except Exception:
+                        pass
+            except Exception as btn_error:
+                logger.warning(f"Could not find or click run button: {btn_error}")
+                # Continue execution even if this fails
         
         # Take another screenshot after interactions
         try:
@@ -364,8 +622,14 @@ async def navigate_to_reporting(page):
         except Exception as ss_error:
             logger.warning(f"Could not save final screenshot: {ss_error}")
         
-        # Even if some steps fail, return success so we can try to export CSV
-        return True
+        # Check if browser is still alive before returning
+        try:
+            await page.evaluate("1")
+            # Even if some steps fail, return success so we can try to export CSV
+            return True
+        except Exception:
+            logger.error("Browser context was closed at the end of navigation")
+            return False
         
     except Exception as e:
         logger.error(f"Error navigating to Reporting tab: {e}")
@@ -373,11 +637,18 @@ async def navigate_to_reporting(page):
 
 async def export_and_download_csv(page):
     """
-    Find and click the EXPORT CSV button, then download the CSV file
+    Find and click the EXPORT CSV button, then download the CSV file with better resilience
     """
     logger.info("Looking for EXPORT CSV button...")
     
     try:
+        # First verify browser is usable
+        try:
+            await page.evaluate("1")
+        except Exception as e:
+            logger.error(f"Browser not usable before export attempt: {e}")
+            return False
+            
         # First take a screenshot to debug
         try:
             await page.screenshot(path="before_export.png")
@@ -395,12 +666,23 @@ async def export_and_download_csv(page):
             "text=EXPORT CSV",
             "text=Export CSV",
             "a:has-text('Export')",
-            "a:has-text('CSV')"
+            "a:has-text('CSV')",
+            "[aria-label*='export' i]",
+            "[aria-label*='csv' i]",
+            "[title*='export' i]", 
+            "[title*='csv' i]"
         ]
         
         export_button = None
         for selector in export_selectors:
             try:
+                # Verify browser is still usable before each selector attempt
+                try:
+                    await page.evaluate("1")
+                except Exception:
+                    logger.error("Browser context closed during export button search")
+                    return False
+                    
                 logger.info(f"Trying to find export button with selector: {selector}")
                 export_button = await page.wait_for_selector(selector, timeout=5000)
                 if export_button:
@@ -410,11 +692,18 @@ async def export_and_download_csv(page):
                 pass
                 
         if not export_button:
-            logger.warning("Could not find EXPORT CSV button")
-            # Try searching entire page for any export button
+            logger.warning("Could not find EXPORT CSV button with selectors")
+            # Try more generic selectors
             try:
                 logger.info("Trying to find any export-related element")
                 await page.screenshot(path="export_search.png")
+                
+                # Verify browser is still usable
+                try:
+                    await page.evaluate("1")
+                except Exception:
+                    logger.error("Browser context closed during generic button search")
+                    return False
                 
                 # Get all buttons on the page
                 buttons = await page.query_selector_all("button, a.btn, .btn, a[role='button']")
@@ -423,6 +712,13 @@ async def export_and_download_csv(page):
                 # Check each button's text for export-related keywords
                 for button in buttons:
                     try:
+                        # Check if browser is still alive
+                        try:
+                            await page.evaluate("1")
+                        except Exception:
+                            logger.error("Browser context closed during button text check")
+                            return False
+                            
                         button_text = await button.inner_text()
                         logger.info(f"Button text: {button_text}")
                         if "export" in button_text.lower() or "csv" in button_text.lower() or "download" in button_text.lower():
@@ -435,6 +731,81 @@ async def export_and_download_csv(page):
                 logger.warning(f"Error searching for buttons: {search_error}")
             
         if not export_button:
+            # Last attempt - try to find by looking at all elements with click handlers
+            try:
+                logger.info("Last attempt - trying to find exportable elements")
+                
+                # Verify browser is still usable
+                try:
+                    await page.evaluate("1")
+                except Exception:
+                    logger.error("Browser context closed during last export button search")
+                    return False
+                
+                # Use JavaScript to find clickable elements that might be export buttons
+                clickable_elements = await page.evaluate("""() => {
+                    const possibleExportElements = [];
+                    // Find elements with onclick attributes or event listeners
+                    document.querySelectorAll('*').forEach(element => {
+                        // Check text content for export/csv related terms
+                        const text = element.textContent || '';
+                        if ((text.toLowerCase().includes('export') || text.toLowerCase().includes('csv') || 
+                             text.toLowerCase().includes('download')) && 
+                            (element.tagName === 'BUTTON' || element.tagName === 'A' || 
+                             element.role === 'button' || window.getComputedStyle(element).cursor === 'pointer')) {
+                            possibleExportElements.push({
+                                tagName: element.tagName,
+                                id: element.id,
+                                className: element.className,
+                                text: text.trim().substring(0, 50),
+                                xpath: getXPath(element)
+                            });
+                        }
+                    });
+                    
+                    // XPath helper function
+                    function getXPath(element) {
+                        if (element.id) return `//*[@id="${element.id}"]`;
+                        if (element === document.body) return '/html/body';
+                        
+                        let ix = 0;
+                        const siblings = element.parentNode.childNodes;
+                        for (let i = 0; i < siblings.length; i++) {
+                            const sibling = siblings[i];
+                            if (sibling === element) return getXPath(element.parentNode) + '/' + element.tagName.toLowerCase() + '[' + (ix + 1) + ']';
+                            if (sibling.nodeType === 1 && sibling.tagName === element.tagName) ix++;
+                        }
+                    }
+                    
+                    return possibleExportElements;
+                }""")
+                
+                logger.info(f"Found {len(clickable_elements)} potential export elements via JavaScript")
+                
+                # Try clicking each potential export element
+                for element_info in clickable_elements:
+                    logger.info(f"Trying potential export element: {element_info}")
+                    
+                    # Verify browser is still usable
+                    try:
+                        await page.evaluate("1")
+                    except Exception:
+                        logger.error("Browser context closed during element click attempt")
+                        return False
+                    
+                    try:
+                        if element_info.get("xpath"):
+                            element = await page.wait_for_selector(f"xpath={element_info['xpath']}", timeout=2000)
+                            if element:
+                                export_button = element
+                                logger.info(f"Found potential export button with XPath: {element_info['xpath']}")
+                                break
+                    except Exception:
+                        pass
+            except Exception as js_error:
+                logger.warning(f"Error in JavaScript search for export elements: {js_error}")
+        
+        if not export_button:
             logger.error("Could not find any export button after exhaustive search")
             return False
             
@@ -442,12 +813,26 @@ async def export_and_download_csv(page):
         download_path = os.path.join(os.getcwd(), "downloads")
         os.makedirs(download_path, exist_ok=True)
         
+        # Verify browser is still usable before download attempt
+        try:
+            await page.evaluate("1")
+        except Exception:
+            logger.error("Browser context closed before download attempt")
+            return False
+        
         # Handle the download event
         logger.info("Setting up download handler")
         
         try:
             # Try the async with approach first
             async with page.expect_download(timeout=30000) as download_info:
+                # Check if browser is still usable
+                try:
+                    await page.evaluate("1")
+                except Exception:
+                    logger.error("Browser context closed right before button click")
+                    return False
+                
                 await export_button.click()
                 logger.info("Clicked EXPORT CSV button, waiting for download...")
                 
@@ -467,11 +852,30 @@ async def export_and_download_csv(page):
             # If the first approach fails, try a simpler approach
             try:
                 logger.info("Trying alternative download approach")
+                
+                # Check if browser is still usable
+                try:
+                    await page.evaluate("1")
+                except Exception:
+                    logger.error("Browser context closed before alternative download attempt")
+                    return False
+                
                 await export_button.click()
                 logger.info("Clicked export button, waiting for download...")
                 
-                # Wait for a moment for the download to start
-                await asyncio.sleep(10)
+                # Wait in small increments for the download
+                for _ in range(10):
+                    await asyncio.sleep(1)
+                    
+                    # Check if browser is still alive
+                    try:
+                        await page.evaluate("1")
+                    except Exception:
+                        logger.warning("Browser closed during download wait, but download may have started")
+                        break
+                
+                # Wait a bit longer for download to complete
+                await asyncio.sleep(5)
                 
                 # Check if any files were downloaded
                 import glob
@@ -572,7 +976,7 @@ async def read_csv_data(csv_path):
         logger.error(f"Error reading CSV data: {e}")
         return []
 
-async def send_slack_notification(data):
+async def send_slack_notification(message):
     """
     Send Slack notification for low RPC values
     """
@@ -583,21 +987,6 @@ async def send_slack_notification(data):
     try:
         import requests
         
-        # Filter for low RPC values
-        low_rpc_data = [item for item in data if item["RPC"] < RPC_THRESHOLD]
-        
-        if not low_rpc_data:
-            logger.info(f"No targets with RPC below ${RPC_THRESHOLD}")
-            return True
-            
-        # Create message text
-        now = datetime.now(pytz.timezone('US/Eastern'))
-        message = f"*RPC ALERT* - {now.strftime('%Y-%m-%d %I:%M %p ET')}:\n"
-        message += f"The following targets have RPC values below ${RPC_THRESHOLD}:\n\n"
-        
-        for item in low_rpc_data:
-            message += f"• *{item['Target']}*: ${item['RPC']:.2f}\n"
-            
         # Create payload for Slack
         payload = {
             "text": message,
@@ -613,7 +1002,7 @@ async def send_slack_notification(data):
         }
         
         # Send to Slack
-        logger.info(f"Sending Slack notification for {len(low_rpc_data)} low RPC values")
+        logger.info("Sending Slack notification")
         response = requests.post(
             SLACK_WEBHOOK_URL,
             data=json.dumps(payload),
@@ -631,76 +1020,136 @@ async def send_slack_notification(data):
         logger.error(f"Error sending Slack notification: {e}")
         return False
 
-async def check_rpc_values():
+async def main():
     """
-    Main function to check RPC values
+    Main function to get RPC values and send Slack notification
     """
-    logger.info("Starting RPC check...")
+    global last_run_result
     
-    # Verify environment variables
-    if not RINGBA_EMAIL or not RINGBA_PASSWORD:
-        logger.error("Missing Ringba credentials. Please check .env file.")
-        return
-        
-    if not SLACK_WEBHOOK_URL:
-        logger.warning("Slack webhook URL not configured. No notifications will be sent.")
+    # Configure environment information for debugging
+    env_info = {
+        "platform": platform.platform(),
+        "python_version": platform.python_version(),
+        "hostname": platform.node(),
+        "processor": platform.processor(),
+        "memory": f"{psutil.virtual_memory().total / (1024 * 1024 * 1024):.2f} GB",
+        "free_memory": f"{psutil.virtual_memory().available / (1024 * 1024 * 1024):.2f} GB",
+        "free_disk": f"{psutil.disk_usage('/').free / (1024 * 1024 * 1024):.2f} GB"
+    }
     
-    playwright = None
-    browser = None
+    logger.info(f"Starting Ringba bot with environment: {env_info}")
     
     try:
-        # Setup browser (use headless=True for production)
-        playwright, browser, context, page = await setup_browser(headless=True)
+        # Initialize playwright
+        global playwright
+        playwright = await async_playwright().start()
+        logger.info("Playwright initialized")
         
-        # Login to Ringba
-        login_success = await login_to_ringba(page)
+        # Get RPC values with retries
+        logger.info("Getting CSV values...")
+        min_rpc, overall_rpc, max_rpc = await get_csv_values(start_fresh=True)
         
-        if not login_success:
-            logger.error("Login failed. Aborting check.")
-            return
+        if min_rpc is None or overall_rpc is None or max_rpc is None:
+            error_message = "Failed to get RPC values after multiple attempts"
+            logger.error(error_message)
             
-        # Navigate to Reporting
-        reporting_success = await navigate_to_reporting(page)
-        
-        if not reporting_success:
-            logger.error("Failed to navigate to Reporting tab. Aborting check.")
-            return
-        
-        # Export and download CSV
-        csv_path = await export_and_download_csv(page)
-        
-        if not csv_path:
-            logger.error("Failed to download CSV. Aborting check.")
-            return
+            # Update last run result
+            last_run_result = {
+                "success": False,
+                "error": error_message,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "environment": env_info
+            }
             
-        # Read data from CSV
-        data = await read_csv_data(csv_path)
-        
-        if not data:
-            logger.error("No data extracted from CSV. Aborting check.")
+            # Send error notification to Slack
+            await send_slack_notification(
+                f"❌ *Ringba Bot Error*: Failed to retrieve RPC values\n"
+                f"*Error*: Failed to get valid RPC values\n"
+                f"*Time*: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"*Environment*: Running on {env_info['platform']} with {env_info['free_memory']} free memory"
+            )
             return
-            
-        # Send notification if needed
-        await send_slack_notification(data)
         
-        logger.info("RPC check completed successfully")
+        # Format values as currency
+        min_rpc_formatted = f"${min_rpc:.2f}"
+        overall_rpc_formatted = f"${overall_rpc:.2f}"
+        max_rpc_formatted = f"${max_rpc:.2f}"
+        
+        # Get the threshold from environment variable, default to 20
+        threshold = float(os.environ.get("RPC_THRESHOLD", "20"))
+        
+        # Determine if RPC is below threshold
+        is_below_threshold = overall_rpc < threshold
+        
+        # Create message for Slack
+        if is_below_threshold:
+            message = (
+                f"🚨 *RPC Alert*: Current RPC is below threshold of ${threshold:.2f}\n"
+                f"*Current RPC*: {overall_rpc_formatted}\n"
+                f"*Min RPC*: {min_rpc_formatted}\n"
+                f"*Max RPC*: {max_rpc_formatted}\n"
+                f"*Time*: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+        else:
+            message = (
+                f"✅ *RPC Status*: Current RPC is above threshold of ${threshold:.2f}\n"
+                f"*Current RPC*: {overall_rpc_formatted}\n"
+                f"*Min RPC*: {min_rpc_formatted}\n"
+                f"*Max RPC*: {max_rpc_formatted}\n"
+                f"*Time*: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+        
+        # Update last run result
+        last_run_result = {
+            "success": True,
+            "min_rpc": min_rpc,
+            "overall_rpc": overall_rpc,
+            "max_rpc": max_rpc,
+            "is_below_threshold": is_below_threshold,
+            "threshold": threshold,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "environment": env_info
+        }
+        
+        # Send notification to Slack
+        logger.info(f"Sending Slack notification: {message}")
+        await send_slack_notification(message)
         
     except Exception as e:
-        logger.error(f"Error in RPC check: {e}")
+        logger.error(f"Error in main function: {e}")
+        logger.exception(e)
         
+        # Update last run result
+        last_run_result = {
+            "success": False,
+            "error": str(e),
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "environment": env_info
+        }
+        
+        # Send error notification to Slack
+        await send_slack_notification(
+            f"❌ *Ringba Bot Error*: An error occurred\n"
+            f"*Error*: {str(e)}\n"
+            f"*Time*: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"*Environment*: Running on {env_info['platform']} with {env_info['free_memory']} free memory"
+        )
+    
     finally:
-        # Clean up
-        if browser:
-            await browser.close()
-        if playwright:
-            await playwright.stop()
+        # Clean up playwright
+        if 'playwright' in globals():
+            try:
+                await playwright.stop()
+                logger.info("Playwright stopped")
+            except Exception as e:
+                logger.warning(f"Error stopping Playwright: {e}")
 
 def run_check():
     """
     Wrapper to run the async check function
     """
     logger.info("Scheduled check triggered")
-    asyncio.run(check_rpc_values())
+    asyncio.run(main())
 
 def setup_schedule():
     """
@@ -727,47 +1176,22 @@ def setup_schedule():
     schedule.every().day.at(f"{(16 + offset_hours) % 24:02d}:30").do(run_check)
     logger.info(f"Scheduled check at 4:30 PM ET (local time: {(16 + offset_hours) % 24:02d}:30)")
 
-def main():
-    """
-    Main function to start the bot
-    """
-    print("==== Ringba RPC Monitor Bot ====")
-    print("This bot will check Ringba RPC values at scheduled times and send Slack notifications.")
-    
-    # Verify environment variables
-    if not RINGBA_EMAIL or not RINGBA_PASSWORD:
-        print("ERROR: Missing Ringba credentials. Please check .env file.")
-        sys.exit(1)
-        
-    if not SLACK_WEBHOOK_URL:
-        print("WARNING: Slack webhook URL not configured. No notifications will be sent.")
-    
-    # Start health check server in a separate thread
-    health_check_thread = threading.Thread(target=start_health_check_server, daemon=True)
-    health_check_thread.start()
-    print(f"Health check server started on port {int(os.environ.get('PORT', 10000))}")
-    
-    # Set up schedule
-    setup_schedule()
-    
-    # Run an initial check
-    print("\nRunning initial check...")
-    run_check()
-    
-    # Enter the schedule loop
-    print("\nEntering schedule loop. Bot is now running.")
-    print("Press Ctrl+C to stop.")
-    
-    while True:
-        schedule.run_pending()
-        time.sleep(60)  # Check schedule every minute
-
+# Run the first check and then schedule periodic checks
 if __name__ == "__main__":
     try:
-        main()
+        # Start health check server in a separate thread
+        logger.info("Starting health check server thread...")
+        health_thread = threading.Thread(target=start_health_check_server, daemon=True)
+        health_thread.start()
+        
+        # Run the first check
+        logger.info("Running initial RPC check...")
+        asyncio.run(main())
+        
+        # Set up schedule for periodic checks
+        setup_schedule()
     except KeyboardInterrupt:
-        print("\nBot stopped by user")
+        logger.info("Bot stopped by user")
     except Exception as e:
-        logger.error(f"Unexpected error: {e}")
-        print(f"\nERROR: {e}")
-        sys.exit(1) 
+        logger.error(f"Error in main thread: {e}")
+        logger.exception(e) 
