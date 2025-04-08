@@ -136,6 +136,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                             <tr>
                                 <th>Target</th>
                                 <th>RPC Value</th>
+                                <th>Incoming</th>
                                 <th>Status</th>
                             </tr>
                     """
@@ -146,6 +147,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     for target in sorted_targets[:50]:  # Limit to first 50 targets
                         target_name = target.get("Target", "Unknown")
                         rpc_value = target.get("RPC", 0)
+                        incoming_count = target.get("Incoming", 0)
                         is_below = rpc_value < threshold
                         status_class = "error" if is_below else "success"
                         status_text = "Below threshold" if is_below else "OK"
@@ -154,6 +156,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         <tr>
                             <td>{target_name}</td>
                             <td>${rpc_value:.2f}</td>
+                            <td>{incoming_count}</td>
                             <td class="{status_class}">{status_text}</td>
                         </tr>
                         """
@@ -475,170 +478,74 @@ async def login_to_ringba(page):
 
 async def navigate_to_reporting(page):
     """
-    Navigate to the Reporting tab and export CSV data with better error handling
+    Navigate directly to the call logs report page - simplified approach for Render.com
     """
-    logger.info("Navigating to Reporting tab...")
+    logger.info("Navigating to call logs report page...")
     
     try:
-        # Navigate directly to the call logs report page with increased timeout
-        await page.goto("https://app.ringba.com/#/dashboard/call-logs/report/new", timeout=90000)
-        logger.info("Navigating directly to call-logs/report/new page")
-        
-        # Check if page is still usable after navigation
+        # First verify browser is usable
         try:
             await page.evaluate("1")
         except Exception as e:
-            logger.error(f"Page is no longer usable after initial navigation: {e}")
+            logger.error(f"Browser not usable before navigation: {e}")
             return False
-        
-        # Wait longer for the page to load in cloud environments
-        # Use shorter sleep intervals with checks to avoid browser termination
-        for i in range(5):
-            await asyncio.sleep(3)
+            
+        # Direct approach with retry mechanism
+        max_attempts = 3
+        for attempt in range(max_attempts):
             try:
-                # Check if page is still alive
-                await page.evaluate("1")
-            except Exception:
-                logger.error("Browser context was closed during page load wait")
-                return False
-        
-        # Save a screenshot for debugging
-        try:
-            await page.screenshot(path="reporting_navigation.png")
-            logger.info("Saved screenshot after navigating to Reporting")
-        except Exception as ss_error:
-            logger.warning(f"Could not save screenshot: {ss_error}")
-        
-        # Check if page is still usable before interacting
-        try:
-            await page.evaluate("1")
-        except Exception:
-            logger.error("Browser context was closed before UI interaction")
-            return False
-        
-        # Try several approaches to find the right UI to interact with
-        apply_clicked = False
-        table_clicked = False
-        run_clicked = False
-        
-        # Approach 1: Look for and click the "Apply" button to load the report
-        try:
-            apply_button = await page.wait_for_selector("button:has-text('Apply')", timeout=10000)
-            if apply_button:
-                logger.info("Found Apply button, clicking it to load report data")
-                await apply_button.click()
-                apply_clicked = True
+                logger.info(f"Navigation attempt {attempt+1}/{max_attempts}")
                 
-                # Wait in smaller intervals with browser checks
-                for i in range(5):
-                    await asyncio.sleep(3)
-                    try:
-                        await page.evaluate("1")
-                    except Exception:
-                        logger.error("Browser context was closed during Apply wait")
+                # Use longer timeout with domcontentloaded to speed things up
+                await page.goto("https://app.ringba.com/#/dashboard/call-logs/report/new", 
+                               timeout=45000, 
+                               wait_until="domcontentloaded")
+                logger.info("Navigated to call logs report page via direct URL")
+                
+                # Take a screenshot for debugging
+                try:
+                    await page.screenshot(path=f"call_logs_navigation_{attempt+1}.png")
+                except Exception:
+                    pass
+                    
+                # Check if page is responsive
+                try:
+                    await page.evaluate("1")
+                    logger.info("Page is responsive after navigation")
+                    
+                    # Wait a moment for the page to initialize
+                    await asyncio.sleep(5)
+                    
+                    # Success - we've reached the page and it's responsive
+                    return True
+                except Exception as e:
+                    logger.error(f"Page not responsive after navigation attempt {attempt+1}: {e}")
+                    
+                    if attempt < max_attempts - 1:
+                        # Wait before retrying
+                        wait_time = 3 * (attempt + 1)
+                        logger.info(f"Waiting {wait_time}s before retry...")
+                        await asyncio.sleep(wait_time)
+                    else:
                         return False
-        except Exception as e:
-            logger.warning(f"Could not find or click Apply button: {e}")
-            # Continue execution even if this fails
-        
-        # Check if browser is still alive
-        try:
-            await page.evaluate("1")
-        except Exception:
-            logger.error("Browser context was closed after Apply button")
-            return False
-        
-        # Approach 2: Try to click on the Table view option
-        if not apply_clicked:
-            try:
-                table_options = [
-                    "text=Table",
-                    "button:has-text('Table')",
-                    "div[role='tab']:has-text('Table')",
-                    ".tab:has-text('Table')"
-                ]
+                        
+            except Exception as e:
+                logger.error(f"Navigation attempt {attempt+1} failed: {e}")
                 
-                for selector in table_options:
-                    try:
-                        table_tab = await page.wait_for_selector(selector, timeout=5000)
-                        if table_tab:
-                            logger.info(f"Found Table tab with selector: {selector}, clicking it")
-                            await table_tab.click()
-                            table_clicked = True
-                            
-                            # Wait in smaller intervals with browser checks
-                            for i in range(3):
-                                await asyncio.sleep(3)
-                                try:
-                                    await page.evaluate("1")
-                                except Exception:
-                                    logger.error("Browser context was closed during table tab wait")
-                                    return False
-                            break
-                    except Exception:
-                        pass
-            except Exception as tab_error:
-                logger.warning(f"Could not find or click Table tab: {tab_error}")
-                # Continue execution even if this fails
+                if attempt < max_attempts - 1:
+                    # Wait before retrying
+                    wait_time = 3 * (attempt + 1)
+                    logger.info(f"Waiting {wait_time}s before retry...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    return False
         
-        # Check if browser is still alive
-        try:
-            await page.evaluate("1")
-        except Exception:
-            logger.error("Browser context was closed after Table tab")
-            return False
-        
-        # Approach 3: Look for any "Run Report" or similar button
-        if not apply_clicked and not table_clicked:
-            try:
-                run_buttons = [
-                    "button:has-text('Run')",
-                    "button:has-text('Run Report')",
-                    "button:has-text('Generate')",
-                    "button:has-text('Submit')"
-                ]
-                
-                for btn_selector in run_buttons:
-                    try:
-                        run_btn = await page.wait_for_selector(btn_selector, timeout=5000)
-                        if run_btn:
-                            logger.info(f"Found button with selector: {btn_selector}, clicking it")
-                            await run_btn.click()
-                            run_clicked = True
-                            
-                            # Wait in smaller intervals with browser checks
-                            for i in range(5):
-                                await asyncio.sleep(3)
-                                try:
-                                    await page.evaluate("1")
-                                except Exception:
-                                    logger.error("Browser context was closed during run button wait")
-                                    return False
-                            break
-                    except Exception:
-                        pass
-            except Exception as btn_error:
-                logger.warning(f"Could not find or click run button: {btn_error}")
-                # Continue execution even if this fails
-        
-        # Take another screenshot after interactions
-        try:
-            await page.screenshot(path="after_report_interactions.png")
-            logger.info("Saved screenshot after report page interactions")
-        except Exception as ss_error:
-            logger.warning(f"Could not save final screenshot: {ss_error}")
-        
-        # Check if browser is still alive before returning
-        try:
-            await page.evaluate("1")
-            # Even if some steps fail, return success so we can try to export CSV
-            return True
-        except Exception:
-            logger.error("Browser context was closed at the end of navigation")
-            return False
+        # If we get here, all attempts failed
+        logger.error("All navigation attempts failed")
+        return False
         
     except Exception as e:
-        logger.error(f"Error navigating to Reporting tab: {e}")
+        logger.error(f"Error in navigate_to_reporting: {e}")
         return False
 
 async def export_and_download_csv(page):
@@ -965,13 +872,30 @@ async def read_csv_data(csv_path):
                     logger.warning(f"Could not convert RPC value to float: {rpc_value}")
                     continue
             
+            # Try to get incoming count if available
+            incoming_count = 0
+            for col in df.columns:
+                if col.lower() in ['incoming', 'calls', 'call count', 'inbound', 'inbound calls']:
+                    try:
+                        incoming_count = int(row[col])
+                        break
+                    except (ValueError, TypeError):
+                        # Try to convert string to number if needed
+                        try:
+                            val = str(row[col]).replace(',', '')
+                            incoming_count = int(float(val))
+                            break
+                        except:
+                            incoming_count = 0
+            
             # Handle NaN or empty target names - these are typically total/average rows
             if pd.isna(target_name) or str(target_name).lower() == 'nan' or str(target_name).strip() == '':
                 target_name = "Totals (all targets average)"
             
             data.append({
                 'Target': str(target_name),
-                'RPC': float(rpc_value)
+                'RPC': float(rpc_value),
+                'Incoming': incoming_count
             })
         
         logger.info(f"Extracted {len(data)} rows of Target and RPC data from CSV")
@@ -1032,54 +956,46 @@ async def send_slack_notification(message):
 
 async def get_csv_values(page=None, start_fresh=False, retry_count=0):
     """
-    Navigate to the reporting page and extract the RPC values by target
+    Get CSV values from Ringba reporting page
     """
-    logger.info("Starting get_csv_values...")
     MAX_RETRIES = 3
+    
+    # Create new browser instance if needed
     browser = None
+    context = None
+    playwright_instance = None
     
     try:
-        # If starting fresh or no page provided, create a new browser session
         if start_fresh or not page:
+            logger.info("Starting get_csv_values...")
             logger.info("Creating new browser instance...")
-            playwright, browser, context, page = await setup_browser(headless=True)
             
-            # Login first
+            # Set up browser with retry mechanism
+            playwright_instance, browser, context, page = await setup_browser(headless=True)
+            
+            # Login to Ringba
+            logger.info("Logging in to Ringba...")
             login_success = await login_to_ringba(page)
+            
             if not login_success:
                 logger.error("Login failed")
                 if retry_count < MAX_RETRIES:
+                    logger.info(f"Retrying get_csv_values (attempt {retry_count + 1}/{MAX_RETRIES})...")
                     if browser:
                         await browser.close()
-                    if 'playwright' in globals():
-                        await playwright.stop()
                     return await get_csv_values(page=None, start_fresh=True, retry_count=retry_count + 1)
                 else:
                     logger.error("Max retries reached for login, giving up")
                     return []
+            
+            # Take screenshot after successful login
+            try:
+                await page.screenshot(path="after_login.png")
+                logger.info("Saved screenshot after login")
+            except Exception as ss_error:
+                logger.warning(f"Could not save screenshot: {ss_error}")
         
-        # Check if browser/page is usable
-        try:
-            await page.evaluate("1")
-        except Exception as e:
-            logger.error(f"Page is not usable after login: {e}")
-            if retry_count < MAX_RETRIES:
-                logger.info(f"Retrying get_csv_values (attempt {retry_count + 1}/{MAX_RETRIES})...")
-                if browser:
-                    await browser.close()
-                return await get_csv_values(page=None, start_fresh=True, retry_count=retry_count + 1)
-            else:
-                logger.error("Max retries reached, giving up")
-                return []
-                
-        # Take screenshot for debugging
-        try:
-            await page.screenshot(path="after_login.png")
-            logger.info("Saved screenshot after login")
-        except Exception as ss_error:
-            logger.warning(f"Could not save screenshot: {ss_error}")
-        
-        # Navigate to reporting page
+        # Navigate to Reporting tab
         logger.info("Navigating to reporting page...")
         navigation_success = await navigate_to_reporting(page)
         
@@ -1093,18 +1009,19 @@ async def get_csv_values(page=None, start_fresh=False, retry_count=0):
             else:
                 logger.error("Max retries reached for navigation, giving up")
                 return []
-        
-        # Download the CSV file
+                
+        # Export and download CSV
         csv_path = await export_and_download_csv(page)
+        
         if not csv_path:
-            logger.error("Failed to download CSV file")
+            logger.error("Failed to export and download CSV")
             if retry_count < MAX_RETRIES:
                 logger.info(f"Retrying get_csv_values (attempt {retry_count + 1}/{MAX_RETRIES})...")
                 if browser:
                     await browser.close()
                 return await get_csv_values(page=None, start_fresh=True, retry_count=retry_count + 1)
             else:
-                logger.error("Max retries reached, giving up")
+                logger.error("Max retries reached for CSV export, giving up")
                 return []
         
         logger.info(f"CSV downloaded to: {csv_path}")
@@ -1185,13 +1102,30 @@ async def get_csv_values(page=None, start_fresh=False, retry_count=0):
                 target_name = row[target_column]
                 rpc_value = row[rpc_column]
                 
+                # Try to get incoming count if available
+                incoming_count = 0
+                for col in df.columns:
+                    if col.lower() in ['incoming', 'calls', 'call count', 'inbound', 'inbound calls']:
+                        try:
+                            incoming_count = int(row[col])
+                            break
+                        except (ValueError, TypeError):
+                            # Try to convert string to number if needed
+                            try:
+                                val = str(row[col]).replace(',', '')
+                                incoming_count = int(float(val))
+                                break
+                            except:
+                                incoming_count = 0
+                
                 # Handle NaN or empty target names - these are typically total/average rows
                 if pd.isna(target_name) or str(target_name).lower() == 'nan' or str(target_name).strip() == '':
                     target_name = "Totals (all targets average)"
                 
                 target_rpc_data.append({
                     'Target': str(target_name),
-                    'RPC': float(rpc_value)
+                    'RPC': float(rpc_value),
+                    'Incoming': incoming_count
                 })
             
             logger.info(f"Extracted {len(target_rpc_data)} target RPC values")
@@ -1315,7 +1249,7 @@ async def main():
         
         # Add each target with low RPC to the message
         for item in low_rpc_targets:
-            message += f"• *{item['Target']}*: ${item['RPC']:.2f}\n"
+            message += f"• *{item['Target']}*: ${item['RPC']:.2f} (Incoming: {item['Incoming']})\n"
         
         # Update last run result
         last_run_result = {
