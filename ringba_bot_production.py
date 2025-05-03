@@ -498,7 +498,7 @@ async def navigate_to_reporting(page):
                 
                 # Use longer timeout with domcontentloaded to speed things up
                 await page.goto("https://app.ringba.com/#/dashboard/call-logs/report/new", 
-                               timeout=45000, 
+                               timeout=60000, 
                                wait_until="domcontentloaded")
                 logger.info("Navigated to call logs report page via direct URL")
                 
@@ -958,7 +958,7 @@ async def get_csv_values(page=None, start_fresh=False, retry_count=0):
     """
     Get CSV values from Ringba reporting page
     """
-    MAX_RETRIES = 3
+    MAX_RETRIES = 4
     
     # Create new browser instance if needed
     browser = None
