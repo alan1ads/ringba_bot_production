@@ -938,18 +938,62 @@ async def send_slack_notification(message):
     try:
         import requests
         
-        # Create payload for Slack
-        payload = {
-            "text": message,
-            "blocks": [
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": message
+        # Check if message is too large (Slack has ~4000 char limit)
+        if len(message) > 3000:
+            logger.info(f"Message length ({len(message)} chars) exceeds recommended size, splitting into smaller messages")
+            
+            # Split the message - find the header part
+            header_parts = message.split("\n\n", 1)
+            header = header_parts[0] + "\n\n"
+            
+            # Rest of the message contains the targets
+            targets_part = header_parts[1] if len(header_parts) > 1 else ""
+            
+            # Split targets into chunks of ~10 targets each
+            target_lines = targets_part.split("\n")
+            
+            # Send header as first message
+            first_payload = {
+                "text": header + f"*Sending data in multiple messages due to size ({len(target_lines)} targets)*"
+            }
+            
+            response = requests.post(
+                SLACK_WEBHOOK_URL,
+                data=json.dumps(first_payload),
+                headers={"Content-Type": "application/json"}
+            )
+            
+            if response.status_code != 200:
+                logger.error(f"Failed to send first Slack notification: {response.status_code} {response.text}")
+                return False
+                
+            # Send targets in chunks of 10
+            chunk_size = 10
+            for i in range(0, len(target_lines), chunk_size):
+                chunk = target_lines[i:i + chunk_size]
+                chunk_message = "\n".join(chunk)
+                
+                if chunk_message.strip():  # Only send non-empty chunks
+                    chunk_payload = {
+                        "text": f"*Targets (continued, {i+1}-{min(i+chunk_size, len(target_lines))} of {len(target_lines)})*\n\n{chunk_message}"
                     }
-                }
-            ]
+                    
+                    chunk_response = requests.post(
+                        SLACK_WEBHOOK_URL,
+                        data=json.dumps(chunk_payload),
+                        headers={"Content-Type": "application/json"}
+                    )
+                    
+                    if chunk_response.status_code != 200:
+                        logger.error(f"Failed to send chunk Slack notification: {chunk_response.status_code} {chunk_response.text}")
+            
+            logger.info("Split Slack notifications sent successfully")
+            return True
+            
+        # For smaller messages, send normally
+        # Create payload for Slack - using simple text instead of blocks for better compatibility
+        payload = {
+            "text": message
         }
         
         # Send to Slack
@@ -1270,9 +1314,9 @@ async def main():
         message = f"📊 *Ringba Report - {now.strftime('%Y-%m-%d %H:%M:%S')} ET:*\n"
         message += f"Current target RPC values:\n\n"
         
-        # Add each target to the message
+        # Add each target to the message with simpler formatting
         for item in targets_to_display:
-            message += f"• *{item['Target']}*: RPC: ${item['RPC']:.2f}, Incoming: {item['Incoming']}, Converted: {item['Converted']}\n"
+            message += f"• {item['Target']} - RPC: ${item['RPC']:.2f}, Incoming: {item['Incoming']}, Converted: {item['Converted']}\n"
         
         # Update last run result
         last_run_result = {
