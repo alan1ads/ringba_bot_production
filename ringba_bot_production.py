@@ -2,8 +2,7 @@
 Ringba RPC Monitor Bot - Production Version
 
 This bot checks Ringba's reporting tab at scheduled times (11 AM, 2 PM, and 4 PM ET),
-extracts Target and RPC data, and sends Slack notifications for any targets with
-RPC values below the threshold.
+extracts Target and RPC data, and sends Slack notifications for all targets with their RPC values.
 
 Usage:
 1. Set up environment variables in .env file
@@ -119,24 +118,18 @@ class RequestHandler(BaseHTTPRequestHandler):
                 
                 if last_run_result.get("success"):
                     target_rpc_data = last_run_result.get("target_rpc_data", [])
-                    low_rpc_targets = last_run_result.get("low_rpc_targets", [])
+                    targets_displayed = last_run_result.get("targets_displayed", [])
                     threshold = last_run_result.get("threshold", 12.0)
-                    
-                    if low_rpc_targets:
-                        alert_class = "error"
-                        alert_text = f"⚠️ {len(low_rpc_targets)} targets with RPC below threshold (${threshold:.2f})"
-                    else:
-                        alert_class = "success"
-                        alert_text = f"✅ All targets have RPC above threshold (${threshold:.2f})"
                     
                     html += f"""
                     <div class="info-box">
-                        <h3 class="{alert_class}">{alert_text}</h3>
+                        <h3 class="success">📊 Ringba Report - {len(targets_displayed)} targets</h3>
                         <table>
                             <tr>
                                 <th>Target</th>
                                 <th>RPC Value</th>
                                 <th>Incoming</th>
+                                <th>Converted</th>
                                 <th>Status</th>
                             </tr>
                     """
@@ -148,6 +141,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         target_name = target.get("Target", "Unknown")
                         rpc_value = target.get("RPC", 0)
                         incoming_count = target.get("Incoming", 0)
+                        converted_count = target.get("Converted", 0)  # Add converted count
                         is_below = rpc_value < threshold
                         status_class = "error" if is_below else "success"
                         status_text = "Below threshold" if is_below else "OK"
@@ -157,6 +151,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                             <td>{target_name}</td>
                             <td>${rpc_value:.2f}</td>
                             <td>{incoming_count}</td>
+                            <td>{converted_count}</td>
                             <td class="{status_class}">{status_text}</td>
                         </tr>
                         """
@@ -276,7 +271,7 @@ RINGBA_URL = "https://app.ringba.com/#/login"
 RINGBA_EMAIL = os.getenv("RINGBA_EMAIL")
 RINGBA_PASSWORD = os.getenv("RINGBA_PASSWORD")
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
-RPC_THRESHOLD = 12.0  # $12 threshold for notifications
+RPC_THRESHOLD = 0.0  # No threshold filtering - show all targets
 
 # Global variable to store the last run result
 last_run_result = None
@@ -825,6 +820,7 @@ async def read_csv_data(csv_path):
         # Look for Target and RPC columns
         target_column = None
         rpc_column = None
+        converted_column = None  # Add converted column tracking
         
         # Check for exact column matches
         for column in df.columns:
@@ -846,6 +842,13 @@ async def read_csv_data(csv_path):
                 if 'rpc' in column.lower():
                     rpc_column = column
                     break
+        
+        # Find Converted column - specifically look for exact match first
+        for col in df.columns:
+            if col.lower() == 'converted':
+                converted_column = col
+                logger.info(f"Found Converted column: {converted_column}")
+                break
         
         if target_column is None or rpc_column is None:
             logger.warning(f"Could not identify Target or RPC columns in: {df.columns}")
@@ -888,6 +891,19 @@ async def read_csv_data(csv_path):
                         except:
                             incoming_count = 0
             
+            # Get converted value if the column was found
+            converted_value = 0
+            if converted_column and not pd.isna(row[converted_column]):
+                try:
+                    # Convert to integer, handling string with commas
+                    if isinstance(row[converted_column], str):
+                        converted_value = int(float(row[converted_column].replace(',', '')))
+                    else:
+                        converted_value = int(row[converted_column])
+                except (ValueError, TypeError):
+                    logger.warning(f"Could not convert Converted value to integer: {row[converted_column]}")
+                    converted_value = 0
+            
             # Handle NaN or empty target names - these are typically total/average rows
             if pd.isna(target_name) or str(target_name).lower() == 'nan' or str(target_name).strip() == '':
                 target_name = "Totals (all targets average)"
@@ -895,7 +911,8 @@ async def read_csv_data(csv_path):
             data.append({
                 'Target': str(target_name),
                 'RPC': float(rpc_value),
-                'Incoming': incoming_count
+                'Incoming': incoming_count,
+                'Converted': converted_value
             })
         
         logger.info(f"Extracted {len(data)} rows of Target and RPC data from CSV")
@@ -1037,6 +1054,7 @@ async def get_csv_values(page=None, start_fresh=False, retry_count=0):
             # Look for target column and RPC column
             target_column = None
             rpc_column = None
+            converted_column = None  # Add converted column tracking
             
             # Find target column
             for col in df.columns:
@@ -1049,6 +1067,13 @@ async def get_csv_values(page=None, start_fresh=False, retry_count=0):
                 if 'rpc' in col.lower():
                     rpc_column = col
                     logger.info(f"Found RPC column: {rpc_column}")
+                    break
+                    
+            # Find Converted column - specifically look for exact match first
+            for col in df.columns:
+                if col.lower() == 'converted':
+                    converted_column = col
+                    logger.info(f"Found Converted column: {converted_column}")
                     break
             
             if not target_column:
@@ -1118,6 +1143,19 @@ async def get_csv_values(page=None, start_fresh=False, retry_count=0):
                             except:
                                 incoming_count = 0
                 
+                # Get converted value if the column was found
+                converted_value = 0
+                if converted_column and not pd.isna(row[converted_column]):
+                    try:
+                        # Convert to integer, handling string with commas
+                        if isinstance(row[converted_column], str):
+                            converted_value = int(float(row[converted_column].replace(',', '')))
+                        else:
+                            converted_value = int(row[converted_column])
+                    except (ValueError, TypeError):
+                        logger.warning(f"Could not convert Converted value to integer: {row[converted_column]}")
+                        converted_value = 0
+                
                 # Handle NaN or empty target names - these are typically total/average rows
                 if pd.isna(target_name) or str(target_name).lower() == 'nan' or str(target_name).strip() == '':
                     target_name = "Totals (all targets average)"
@@ -1125,7 +1163,8 @@ async def get_csv_values(page=None, start_fresh=False, retry_count=0):
                 target_rpc_data.append({
                     'Target': str(target_name),
                     'RPC': float(rpc_value),
-                    'Incoming': incoming_count
+                    'Incoming': incoming_count,
+                    'Converted': converted_value
                 })
             
             logger.info(f"Extracted {len(target_rpc_data)} target RPC values")
@@ -1223,46 +1262,30 @@ async def main():
         # Get the RPC threshold (default to 12.0)
         threshold = float(os.environ.get("RPC_THRESHOLD", "12.0"))
         
-        # Filter targets that have RPC below the threshold
-        low_rpc_targets = [item for item in target_rpc_data if item["RPC"] < threshold]
+        # Use all targets instead of filtering by RPC
+        targets_to_display = target_rpc_data
         
-        # If no targets below threshold, log and exit
-        if not low_rpc_targets:
-            logger.info(f"No targets with RPC below ${threshold}")
-            
-            # Update last run result
-            last_run_result = {
-                "success": True,
-                "target_rpc_data": target_rpc_data,
-                "low_rpc_targets": [],
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "environment": env_info
-            }
-            
-            # No notification needed
-            return
-        
-        # Create message for Slack with the targets below threshold
+        # Create message for Slack with all targets
         now = datetime.now()
-        message = f"🚨 *RPC ALERT - {now.strftime('%Y-%m-%d %H:%M:%S')} ET:*\n"
-        message += f"The following targets have RPC values below ${threshold}:\n\n"
+        message = f"📊 *Ringba Report - {now.strftime('%Y-%m-%d %H:%M:%S')} ET:*\n"
+        message += f"Current target RPC values:\n\n"
         
-        # Add each target with low RPC to the message
-        for item in low_rpc_targets:
-            message += f"• *{item['Target']}*: ${item['RPC']:.2f} (Incoming: {item['Incoming']})\n"
+        # Add each target to the message
+        for item in targets_to_display:
+            message += f"• *{item['Target']}*: RPC: ${item['RPC']:.2f}, Incoming: {item['Incoming']}, Converted: {item['Converted']}\n"
         
         # Update last run result
         last_run_result = {
             "success": True,
             "target_rpc_data": target_rpc_data,
-            "low_rpc_targets": low_rpc_targets,
+            "targets_displayed": targets_to_display,
             "threshold": threshold,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "environment": env_info
         }
         
         # Send notification to Slack
-        logger.info(f"Sending Slack notification for {len(low_rpc_targets)} targets with low RPC")
+        logger.info(f"Sending Slack notification for {len(targets_to_display)} targets")
         await send_slack_notification(message)
         
     except Exception as e:
