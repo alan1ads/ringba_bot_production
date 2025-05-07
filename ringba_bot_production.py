@@ -32,6 +32,7 @@ import pandas as pd
 import platform
 import psutil
 from playwright.async_api import async_playwright
+from supabase import create_client, Client
 
 # Configure logging
 logging.basicConfig(
@@ -116,45 +117,113 @@ class RequestHandler(BaseHTTPRequestHandler):
                     <p>Last run: {last_run_result.get("timestamp", "Unknown")}</p>
                 """
                 
+                # Add report type (comparative or standard)
+                if last_run_result.get("is_comparative", False):
+                    html += f"""
+                    <p><strong>Report Type:</strong> <span class="success">Comparative Report</span></p>
+                    """
+                else:
+                    html += f"""
+                    <p><strong>Report Type:</strong> Standard Report</p>
+                    """
+                
                 if last_run_result.get("success"):
                     target_rpc_data = last_run_result.get("target_rpc_data", [])
                     targets_displayed = last_run_result.get("targets_displayed", [])
                     threshold = last_run_result.get("threshold", 12.0)
+                    is_comparative = last_run_result.get("is_comparative", False)
                     
-                    html += f"""
-                    <div class="info-box">
-                        <h3 class="success">📊 Ringba Report - {len(targets_displayed)} targets</h3>
-                        <table>
-                            <tr>
-                                <th>Target</th>
-                                <th>RPC Value</th>
-                                <th>Incoming</th>
-                                <th>Converted</th>
-                                <th>Status</th>
-                            </tr>
-                    """
-                    
-                    # Sort by RPC value (lowest first)
-                    sorted_targets = sorted(target_rpc_data, key=lambda x: x['RPC'])
-                    
-                    for target in sorted_targets[:50]:  # Limit to first 50 targets
-                        target_name = target.get("Target", "Unknown")
-                        rpc_value = target.get("RPC", 0)
-                        incoming_count = target.get("Incoming", 0)
-                        converted_count = target.get("Converted", 0)  # Add converted count
-                        is_below = rpc_value < threshold
-                        status_class = "error" if is_below else "success"
-                        status_text = "Below threshold" if is_below else "OK"
-                        
+                    # Different table structure for comparative reports
+                    if is_comparative:
                         html += f"""
-                        <tr>
-                            <td>{target_name}</td>
-                            <td>${rpc_value:.2f}</td>
-                            <td>{incoming_count}</td>
-                            <td>{converted_count}</td>
-                            <td class="{status_class}">{status_text}</td>
-                        </tr>
+                        <div class="info-box">
+                            <h3 class="success">📊 Ringba Comparative Report - {len(targets_displayed)} targets</h3>
+                            <table>
+                                <tr>
+                                    <th>Target</th>
+                                    <th>RPC</th>
+                                    <th>Incoming</th>
+                                    <th>Converted</th>
+                                    <th>Status</th>
+                                </tr>
                         """
+                        
+                        # Sort by RPC percentage change (largest negative first)
+                        sorted_targets = sorted(
+                            [t for t in targets_displayed if "RPC_pct" in t and t["RPC_pct"] is not None],
+                            key=lambda x: x["RPC_pct"]
+                        )
+                        
+                        for target in sorted_targets[:50]:  # Limit to first 50 targets
+                            target_name = target.get("Target", "Unknown")
+                            rpc_value = target.get("RPC", 0)
+                            rpc_pct = target.get("RPC_pct", 0)
+                            incoming_count = target.get("Incoming", 0)
+                            incoming_pct = target.get("Incoming_pct", 0)
+                            converted_count = target.get("Converted", 0)
+                            converted_pct = target.get("Converted_pct", 0)
+                            
+                            # Determine status class based on RPC percentage change
+                            if rpc_pct > 5:  # More than 5% increase
+                                status_class = "success"
+                                status_text = "↗️ Improved"
+                            elif rpc_pct < -5:  # More than 5% decrease
+                                status_class = "error"
+                                status_text = "↘️ Decreased"
+                            else:  # Between -5% and 5%
+                                status_class = "warning"
+                                status_text = "→ Stable"
+                            
+                            # Format percentage changes
+                            rpc_pct_str = f"{'+' if rpc_pct > 0 else ''}{rpc_pct:.1f}%"
+                            incoming_pct_str = f"{'+' if incoming_pct > 0 else ''}{incoming_pct:.1f}%"
+                            converted_pct_str = f"{'+' if converted_pct > 0 else ''}{converted_pct:.1f}%"
+                            
+                            html += f"""
+                            <tr>
+                                <td>{target_name}</td>
+                                <td>${rpc_value:.2f} ({rpc_pct_str})</td>
+                                <td>{incoming_count} ({incoming_pct_str})</td>
+                                <td>{converted_count} ({converted_pct_str})</td>
+                                <td class="{status_class}">{status_text}</td>
+                            </tr>
+                            """
+                    else:
+                        # Standard report table
+                        html += f"""
+                        <div class="info-box">
+                            <h3 class="success">📊 Ringba Report - {len(targets_displayed)} targets</h3>
+                            <table>
+                                <tr>
+                                    <th>Target</th>
+                                    <th>RPC Value</th>
+                                    <th>Incoming</th>
+                                    <th>Converted</th>
+                                    <th>Status</th>
+                                </tr>
+                        """
+                        
+                        # Sort by RPC value (lowest first)
+                        sorted_targets = sorted(target_rpc_data, key=lambda x: x['RPC'])
+                        
+                        for target in sorted_targets[:50]:  # Limit to first 50 targets
+                            target_name = target.get("Target", "Unknown")
+                            rpc_value = target.get("RPC", 0)
+                            incoming_count = target.get("Incoming", 0)
+                            converted_count = target.get("Converted", 0)  # Add converted count
+                            is_below = rpc_value < threshold
+                            status_class = "error" if is_below else "success"
+                            status_text = "Below threshold" if is_below else "OK"
+                            
+                            html += f"""
+                            <tr>
+                                <td>{target_name}</td>
+                                <td>${rpc_value:.2f}</td>
+                                <td>{incoming_count}</td>
+                                <td>{converted_count}</td>
+                                <td class="{status_class}">{status_text}</td>
+                            </tr>
+                            """
                     
                     html += """
                     </table>
@@ -214,7 +283,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             health_status = {
                 "status": "healthy",
                 "lastRun": last_run_result.get("timestamp", "Never"),
-                "success": last_run_result.get("success", False)
+                "success": last_run_result.get("success", False),
+                "isComparative": last_run_result.get("is_comparative", False)
             }
             
             self.wfile.write(json.dumps(health_status).encode())
@@ -272,6 +342,7 @@ RINGBA_EMAIL = os.getenv("RINGBA_EMAIL")
 RINGBA_PASSWORD = os.getenv("RINGBA_PASSWORD")
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
 RPC_THRESHOLD = 0.0  # No threshold filtering - show all targets
+DATA_STORAGE_FILE = "ringba_report_data.json"  # File to store previous run data
 
 # Global variable to store the last run result
 last_run_result = None
@@ -927,6 +998,139 @@ async def read_csv_data(csv_path):
         logger.error(f"Error reading CSV data: {e}")
         return []
 
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_API_KEY")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+def get_time_slot(run_time):
+    hour = run_time.hour
+    minute = run_time.minute
+    if hour == 10 and minute < 30:
+        return "10AM"
+    elif hour == 14 and minute < 30:
+        return "2PM"
+    elif hour == 16 and minute >= 30:
+        return "4:30PM"
+    return f"{hour}:{minute}"
+
+def save_report_data(target_rpc_data, run_time):
+    try:
+        run_time_str = run_time.strftime("%Y-%m-%d %H:%M:%S")
+        time_slot = get_time_slot(run_time)
+        data = {
+            "time_slot": time_slot,
+            "timestamp": run_time_str,
+            "targets": target_rpc_data
+        }
+        # Upsert (insert or update) the record for this time_slot
+        supabase.table("ringba_reports").upsert(data, on_conflict=["time_slot"]).execute()
+        logger.info(f"Saved report data to Supabase for time slot: {time_slot}")
+        return True
+    except Exception as e:
+        logger.error(f"Error saving data to Supabase: {e}")
+        return False
+
+def get_previous_report_data(current_time):
+    try:
+        time_slot = get_time_slot(current_time)
+        previous_slot = None
+        if time_slot == "2PM":
+            previous_slot = "10AM"
+        elif time_slot == "4:30PM":
+            previous_slot = "2PM"
+        if previous_slot:
+            result = supabase.table("ringba_reports").select("targets").eq("time_slot", previous_slot).execute()
+            if result.data and len(result.data) > 0:
+                return result.data[0]["targets"]
+        return None
+    except Exception as e:
+        logger.error(f"Error retrieving data from Supabase: {e}")
+        return None
+
+def calculate_percentage_difference(current_value, previous_value):
+    """
+    Calculate percentage difference between current and previous values
+    
+    Args:
+        current_value: Current numeric value
+        previous_value: Previous numeric value to compare against
+    
+    Returns:
+        Float representing percentage change (positive for increase, negative for decrease)
+    """
+    if previous_value == 0:
+        # Avoid division by zero
+        if current_value == 0:
+            return 0.0  # No change if both are zero
+        else:
+            return 100.0  # 100% increase if previous was zero
+    
+    return ((current_value - previous_value) / previous_value) * 100.0
+
+def create_comparative_report(current_data, previous_data):
+    """
+    Create a comparative report showing percentage differences
+    
+    Args:
+        current_data: List of dictionaries with current target data
+        previous_data: List of dictionaries with previous target data
+    
+    Returns:
+        List of dictionaries with the same structure as current_data but with percentage differences
+    """
+    logger.info("Creating comparative report")
+    
+    if not previous_data:
+        logger.warning("No previous data available for comparison")
+        return current_data
+    
+    # Create a lookup dictionary from previous data for faster access
+    previous_lookup = {item["Target"]: item for item in previous_data}
+    
+    # Create comparative report
+    comparative_data = []
+    for current_item in current_data:
+        target_name = current_item["Target"]
+        
+        # Create a new report item
+        report_item = {
+            "Target": target_name,
+            "RPC": current_item["RPC"],
+            "Incoming": current_item["Incoming"],
+            "Converted": current_item["Converted"],
+            "is_comparative": True  # Flag to indicate this is a comparative report
+        }
+        
+        # Add percentage differences if target was in previous data
+        if target_name in previous_lookup:
+            previous_item = previous_lookup[target_name]
+            
+            # Calculate percentage differences
+            report_item["RPC_pct"] = calculate_percentage_difference(
+                current_item["RPC"], previous_item["RPC"])
+            
+            report_item["Incoming_pct"] = calculate_percentage_difference(
+                current_item["Incoming"], previous_item["Incoming"])
+            
+            report_item["Converted_pct"] = calculate_percentage_difference(
+                current_item["Converted"], previous_item["Converted"])
+            
+            # Also store previous values for reference
+            report_item["Previous_RPC"] = previous_item["RPC"]
+            report_item["Previous_Incoming"] = previous_item["Incoming"]
+            report_item["Previous_Converted"] = previous_item["Converted"]
+        else:
+            # Target is new, so no percentage change available
+            logger.info(f"Target '{target_name}' is new, no comparison available")
+            report_item["RPC_pct"] = None
+            report_item["Incoming_pct"] = None
+            report_item["Converted_pct"] = None
+        
+        comparative_data.append(report_item)
+    
+    logger.info(f"Created comparative report with {len(comparative_data)} targets")
+    return comparative_data
+
 async def send_slack_notification(message):
     """
     Send Slack notification for low RPC values
@@ -1309,28 +1513,114 @@ async def main():
         # Use all targets instead of filtering by RPC
         targets_to_display = target_rpc_data
         
-        # Create message for Slack with all targets
-        now = datetime.now()
-        message = f"📊 *Ringba Report - {now.strftime('%Y-%m-%d %H:%M:%S')} ET:*\n"
-        message += f"Current target RPC values:\n\n"
+        # Get current time in Eastern Time
+        eastern = pytz.timezone('US/Eastern')
+        now = datetime.now(eastern)
         
-        # Add each target to the message with simpler formatting
-        for item in targets_to_display:
-            message += f"• {item['Target']} - RPC: ${item['RPC']:.2f}, Incoming: {item['Incoming']}, Converted: {item['Converted']}\n"
+        # Get previous report data for comparison if needed
+        is_comparative_report = False
+        report_data = None
+        
+        # Determine if this is a comparison report time (2 PM or 4:30 PM)
+        if now.hour == 14 and now.minute < 30:  # 2 PM ET
+            logger.info("This is a 2 PM run - creating comparative report vs 10 AM")
+            is_comparative_report = True
+            previous_data = get_previous_report_data(now)
+            if previous_data:
+                report_data = create_comparative_report(target_rpc_data, previous_data)
+            else:
+                logger.warning("No 10 AM data available for comparison, using standard report")
+                report_data = target_rpc_data
+                is_comparative_report = False
+        elif now.hour == 16 and now.minute >= 30:  # 4:30 PM ET
+            logger.info("This is a 4:30 PM run - creating comparative report vs 2 PM")
+            is_comparative_report = True
+            previous_data = get_previous_report_data(now)
+            if previous_data:
+                report_data = create_comparative_report(target_rpc_data, previous_data)
+            else:
+                logger.warning("No 2 PM data available for comparison, using standard report")
+                report_data = target_rpc_data
+                is_comparative_report = False
+        else:
+            # Standard report for other times (e.g., 10 AM)
+            logger.info("This is a standard report - no comparison needed")
+            report_data = target_rpc_data
+        
+        # Format message for Slack differently based on report type
+        if is_comparative_report:
+            # Format as comparative report
+            if now.hour == 14:
+                message = f"📊 *Ringba Comparative Report - {now.strftime('%Y-%m-%d %H:%M:%S')} ET (vs 10 AM):*\n\n"
+            else:  # 4:30 PM
+                message = f"📊 *Ringba Comparative Report - {now.strftime('%Y-%m-%d %H:%M:%S')} ET (vs 2 PM):*\n\n"
+            
+            # Add each target to the message with comparative formatting
+            for item in report_data:
+                target_name = item["Target"]
+                
+                # Format percentage changes with arrows
+                rpc_pct = item.get("RPC_pct")
+                incoming_pct = item.get("Incoming_pct")
+                converted_pct = item.get("Converted_pct")
+                
+                # Only include targets that have comparison data
+                if rpc_pct is not None:
+                    # Format RPC with arrow
+                    if rpc_pct > 0:
+                        rpc_str = f"↗️ +{rpc_pct:.1f}%"
+                    elif rpc_pct < 0:
+                        rpc_str = f"↘️ {rpc_pct:.1f}%"
+                    else:
+                        rpc_str = f"→ {rpc_pct:.1f}%"
+                    
+                    # Format Incoming with arrow
+                    if incoming_pct > 0:
+                        incoming_str = f"↗️ +{incoming_pct:.1f}%"
+                    elif incoming_pct < 0:
+                        incoming_str = f"↘️ {incoming_pct:.1f}%"
+                    else:
+                        incoming_str = f"→ {incoming_pct:.1f}%"
+                    
+                    # Format Converted with arrow
+                    if converted_pct > 0:
+                        converted_str = f"↗️ +{converted_pct:.1f}%"
+                    elif converted_pct < 0:
+                        converted_str = f"↘️ {converted_pct:.1f}%"
+                    else:
+                        converted_str = f"→ {converted_pct:.1f}%"
+                    
+                    # Add target to message with percentage changes
+                    message += f"• {target_name} - RPC: {rpc_str}, Incoming: {incoming_str}, Converted: {converted_str}\n"
+                else:
+                    # New target with no comparison data
+                    message += f"• {target_name} - RPC: ${item['RPC']:.2f}, Incoming: {item['Incoming']}, Converted: {item['Converted']} (new target, no comparison)\n"
+        else:
+            # Format as standard report
+            message = f"📊 *Ringba Report - {now.strftime('%Y-%m-%d %H:%M:%S')} ET:*\n"
+            message += f"Current target RPC values:\n\n"
+            
+            # Add each target to the message with standard formatting
+            for item in report_data:
+                message += f"• {item['Target']} - RPC: ${item['RPC']:.2f}, Incoming: {item['Incoming']}, Converted: {item['Converted']}\n"
         
         # Update last run result
         last_run_result = {
             "success": True,
             "target_rpc_data": target_rpc_data,
-            "targets_displayed": targets_to_display,
+            "targets_displayed": report_data,
             "threshold": threshold,
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "environment": env_info
+            "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "environment": env_info,
+            "is_comparative": is_comparative_report
         }
         
         # Send notification to Slack
-        logger.info(f"Sending Slack notification for {len(targets_to_display)} targets")
+        logger.info(f"Sending Slack notification for {len(report_data)} targets")
         await send_slack_notification(message)
+        
+        # Save the data for future comparison
+        save_report_data(target_rpc_data, now)
         
     except Exception as e:
         logger.error(f"Error in main function: {e}")
@@ -1372,7 +1662,7 @@ def setup_schedule():
     """
     Set up the schedule for automatic checks
     """
-    # Schedule checks at 11 AM, 2 PM, and 4 PM Eastern Time
+    # Schedule checks at 10 AM, 2 PM, and 4:30 PM Eastern Time
     eastern = pytz.timezone('US/Eastern')
     local_tz = pytz.timezone('US/Eastern')  # Adjust based on server location if needed
     
@@ -1384,8 +1674,8 @@ def setup_schedule():
     offset_hours = (now_local.hour - now_eastern.hour) % 24
     
     # Schedule checks in local time
-    schedule.every().day.at(f"{(11 + offset_hours) % 24:02d}:00").do(run_check)
-    logger.info(f"Scheduled check at 11:00 AM ET (local time: {(11 + offset_hours) % 24:02d}:00)")
+    schedule.every().day.at(f"{(10 + offset_hours) % 24:02d}:00").do(run_check)
+    logger.info(f"Scheduled check at 10:00 AM ET (local time: {(10 + offset_hours) % 24:02d}:00)")
     
     schedule.every().day.at(f"{(14 + offset_hours) % 24:02d}:00").do(run_check)
     logger.info(f"Scheduled check at 2:00 PM ET (local time: {(14 + offset_hours) % 24:02d}:00)")
